@@ -96,8 +96,9 @@ Change the settings and press Run to see where the systems agree or disagree.</p
   <fieldset>
     <legend>Rules</legend>
     <label>Sperregrense (4% threshold)</label>
-    <span class="hint"><b>On:</b> the 19 Utjevning mandates form a national pool counted on the national vote totals,
-    and only parties with at least 4% of the national vote can win from it. This is close to Norway's levelling seats.<br>
+    <span class="hint"><b>On:</b> the 19 Utjevning mandates are levelling seats, as in Norway. Every party with at least
+    4% of the national vote gets its fair share of 169 seats (by national votes) minus the seats it already won in
+    the districts, so the districts' distortions are evened out. Parties already above their fair share get none.<br>
     <b>Off:</b> Utjevning becomes a 20th district with its own freshly made voters and 19 mandates, counted exactly
     like every other district. No threshold anywhere.</span>
     <label><input type="radio" name="sperregrense" value="on" {sperre_on}> On</label>
@@ -167,8 +168,10 @@ def run(form: dict[str, str]) -> str:
     S = STORTING_SEATS
     split_txt = ",".join(map(str, weights))
     if sperre:
-        mode = (f"Sperregrense on: the {LEVELLING_SEATS} {LEVELLING} mandates are a national pool for parties with at least "
-                f"{THRESHOLD:.0%} of the vote: {html.escape(', '.join(e.eligible))}.")
+        mode = (f"Sperregrense on: the {LEVELLING_SEATS} {LEVELLING} mandates are levelling seats. Each party with at "
+                f"least {THRESHOLD:.0%} of the national vote ({html.escape(', '.join(e.eligible))}) gets its fair "
+                "national share of 169 seats minus what it already won in the districts. Parties already above "
+                "their fair share get none. The split rule does not apply to these seats.")
     else:
         mode = (f"Sperregrense off: {LEVELLING} is a 20th district with {len(e.district_ballots[LEVELLING])} voters "
                 f"and {LEVELLING_SEATS} mandates.")
@@ -248,6 +251,8 @@ def run(form: dict[str, str]) -> str:
                "<th>Plurality</th><th>Storting</th></tr>")
 
     def top(res, d):
+        if d == LEVELLING and sperre:  # levelling: show every party's share
+            return html.escape(", ".join(f"{c} {n}" for c, n in res.by_district[d].items() if n)) or "-"
         best = max(res.by_district[d].values())
         return html.escape(" = ".join(c for c in names if res.by_district[d][c] == best)) + f" ({best})"
 

@@ -415,19 +415,34 @@ class Election:
         return first[0] if len(first) == 1 and all(v == first for v in self.picks().values()) else None
 
 
-def levelling_pool(e_votes: dict[str, int], mj_national: list[MJResult], candidates: list[str],
-                   weights: list[int], eligible: list[str]) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
-    """The 19 Utjevning mandates counted on national votes, only among eligible parties.
+def levelling_seats(votes: dict[str, int], district_seats: dict[str, int], eligible: list[str],
+                    total: int = STORTING_SEATS) -> dict[str, int]:
+    """Norway's levelling rule: fill each eligible party's deficit against its fair national share.
 
-    Returns (mj, plurality, storting) seat dicts over all candidates.
+    1. Parties under the threshold keep their district seats; those seats are set aside.
+    2. The remaining seats are shared among eligible parties by modified Sainte-Lague on
+       national votes: that is each party's fair share.
+    3. A party that already won more district seats than its fair share is taken out of
+       the pool (it keeps what it has) and step 2 is redone without it.
+    4. Each party left gets fair share minus district seats. These add up to exactly the
+       seats the districts gave up (19). The split rule never applies here.
     """
-    mj_ranking = [r.name for r in mj_national if r.name in eligible]
-    pl_ranking = sorted(eligible, key=lambda c: -e_votes[c])
-    zero = {c: 0 for c in candidates}
-    mj = {**zero, **split_seats(LEVELLING_SEATS, mj_ranking, weights)}
-    pl = {**zero, **split_seats(LEVELLING_SEATS, pl_ranking, weights)}
-    st = {**zero, **sainte_lague({c: e_votes[c] for c in eligible}, LEVELLING_SEATS)}
-    return mj, pl, st
+    pool = [c for c in eligible]
+    fair: dict[str, int] = {}
+    while pool:
+        remaining = total - sum(n for c, n in district_seats.items() if c not in pool)
+        fair = sainte_lague({c: votes[c] for c in pool}, remaining)
+        over = [c for c in pool if district_seats[c] > fair[c]]
+        if not over:
+            break
+        pool = [c for c in pool if c not in over]
+    out = {c: 0 for c in district_seats}
+    if not pool:  # every eligible party is already over its share: plain proportional fallback
+        out.update(sainte_lague({c: votes[c] for c in eligible}, total - sum(district_seats.values())))
+        return out
+    for c in pool:
+        out[c] = fair[c] - district_seats[c]
+    return out
 
 
 def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
@@ -451,9 +466,8 @@ def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
     if sperregrense:
         total = sum(votes.values()) or 1
         eligible = [c for c in candidates if votes[c] / total >= THRESHOLD] or list(candidates)
-        pool = levelling_pool(votes, mj_national, candidates, weights, eligible)
-        for res, seats in zip((mj, pl, st), pool):
-            res.by_district[LEVELLING] = seats
+        for res in (mj, pl, st):
+            res.by_district[LEVELLING] = levelling_seats(votes, res.seats, eligible)
         mj, pl, st = (_finish(r.by_district, candidates) for r in (mj, pl, st))
 
     return Election(
@@ -512,6 +526,12 @@ def print_report(e: Election, candidates: list[str], weights: list[int]) -> None
         voters = str(len(e.district_ballots[d])) if d in e.district_ballots else "national"
         print(f"{d:{dw}}  {seats_in(d):>5}  {voters:>8}  "
               f"{top(e.mj):{width}}  {top(e.plurality):{width}}  {top(e.storting):{width}}")
+    if e.sperregrense:
+        print()
+        print(f"{LEVELLING} (levelling, fair share minus district seats):")
+        for name, res in (("Majority Judgment", e.mj), ("Plurality", e.plurality), ("Storting", e.storting)):
+            parts = ", ".join(f"{c} {n}" for c, n in res.by_district[LEVELLING].items() if n)
+            print(f"  {name:<18} {parts or '-'}")
     print()
 
     winner = e.agree()

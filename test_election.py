@@ -25,6 +25,7 @@ from election import (
     split_voters,
     LEVELLING,
     LEVELLING_SEATS,
+    levelling_seats,
     seats_in,
 )
 
@@ -250,6 +251,46 @@ def test_sperregrense_blocks_small_party_from_pool():
     e_off = count_all(db_off, parties, random.Random(0), [3, 2, 1], False)
     assert e_off.eligible == parties
     assert e_off.mj.by_district[LEVELLING]["C"] == 3  # third place gets the "least" share
+
+
+def test_levelling_fills_deficit():
+    votes = {"A": 500, "B": 300, "C": 200}
+    # fair share of 169 by Sainte-Lague: A 85, B 50, C 34 (approx). A already has too many
+    # district seats, so it is taken out and B and C fill their deficits with the 19.
+    district = {"A": 100, "B": 40, "C": 10}
+    lev = levelling_seats(votes, district, ["A", "B", "C"])
+    assert lev["A"] == 0
+    assert sum(lev.values()) == 19
+    final = {c: district[c] + lev[c] for c in votes}
+    # B and C end up at their fair share of the 69 seats left after A
+    assert final["B"] + final["C"] == 69
+    assert final["B"] > final["C"]
+
+    # ineligible party keeps its district seats, gets no levelling seats
+    lev2 = levelling_seats(votes, {"A": 70, "B": 50, "C": 30}, ["A", "B"])
+    assert lev2["C"] == 0 and sum(lev2.values()) == 19
+
+    # nothing to correct: pure proportional top-up
+    lev3 = levelling_seats(votes, {"A": 75, "B": 45, "C": 30}, ["A", "B", "C"])
+    assert sum(lev3.values()) == 19 and all(n >= 0 for n in lev3.values())
+
+
+def test_levelling_makes_storting_proportional():
+    parties = ["A", "B", "C"]
+    db = simulate_districts(parties, 20000, random.Random(11), True)
+    e = count_all(db, parties, random.Random(0), [1], True)
+    total = sum(e.votes.values())
+    for c in parties:
+        assert abs(e.storting.seats[c] / 169 - e.votes[c] / total) < 0.02
+    # the pool is always exactly 19 and only goes to parties below their fair share
+    for res in (e.mj, e.plurality, e.storting):
+        pool = res.by_district[LEVELLING]
+        assert sum(pool.values()) == 19
+        fair = sainte_lague(e.votes, 169)
+        for c in parties:
+            district_only = res.seats[c] - pool[c]
+            if pool[c] > 0:
+                assert district_only + pool[c] <= fair[c] + 1  # filled up to (about) fair share
 
 
 def test_winner_takes_all_when_unanimous():
