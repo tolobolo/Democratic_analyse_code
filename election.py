@@ -10,22 +10,36 @@ district so that all three hand out the 169 mandates:
   Plurality          district ranking by votes (the favourite), mandates by --split
   Storting (Norway)  modified Sainte-Lague (1.4, 3, 5, 7, ...) per district, real seat counts
 
-The 19 remaining mandates ("Utjevning"):
-  --sperregrense     (default) a national pool counted on national votes, open only
-                     to parties with at least 4% of the national vote
-  --no-sperregrense  a 20th district with its own simulated voters, counted like the rest
+The 19 remaining mandates ("Utjevning") are levelling seats: each party gets its fair
+national share (Sainte-Lague on national votes) minus what it won in the districts.
+  --sperregrense     (default) only parties with at least 4% of the national vote qualify
+  --no-sperregrense  every party qualifies
 
 --split 1       winner takes all of the district's mandates (default)
 --split 2,1,1   half to the winner, a quarter each to second and third
 --split 3,2,1   most / ok / least to the top three, nothing to the rest
+--split norway  Norway's own split: modified Sainte-Lague (1.4, 3, 5, ...) per district.
+                Plurality shares on votes (identical to the Storting count). Majority
+                Judgment shares on supporters = voters who graded the party Good or better,
+                since grades give no vote count. Then the only difference between the
+                systems is how voters express themselves, not how mandates are split.
+
+Real voters: --cses YEAR loads Norwegian respondents from the CSES Integrated Module
+Dataset (data/cses_imd_csv.zip, years 1997-2017). Their 0-10 like/dislike scores become
+grades, their reported vote is the plurality/Storting vote.
 
 Run:  python election.py --voters 10000 --split 2,1,1 --no-sperregrense
       python election.py --candidates Ap Hoyre Frp MDG
+      python election.py --cses 2017 --split 2,1,1
 """
 from __future__ import annotations
 
 import argparse
+import csv
+import io
+import os
 import random
+import zipfile
 from collections import Counter
 from functools import cmp_to_key
 from dataclasses import dataclass
@@ -288,15 +302,9 @@ def seats_in(district: str) -> int:
     return LEVELLING_SEATS if district == LEVELLING else DISTRICTS[district][0] - 1
 
 
-def split_voters(n_voters: int, sperregrense: bool = True) -> dict[str, int]:
-    """Voters per district in proportion to population; rounding leftover to the largest district.
-
-    With sperregrense off, Utjevning is a real district and gets voters too, at the same
-    voters-per-mandate rate as the rest.
-    """
+def split_voters(n_voters: int) -> dict[str, int]:
+    """Voters per district in proportion to population; rounding leftover to the largest district."""
     pops = {d: p for d, (_, p) in DISTRICTS.items()}
-    if not sperregrense:
-        pops[LEVELLING] = sum(pops.values()) * LEVELLING_SEATS / DISTRICT_SEATS
     total_pop = sum(pops.values())
     out = {d: round(n_voters * p / total_pop) for d, p in pops.items()}
     biggest = max(pops, key=pops.get)
@@ -304,14 +312,24 @@ def split_voters(n_voters: int, sperregrense: bool = True) -> dict[str, int]:
     return out
 
 
-def simulate_districts(candidates: list[str], n_voters: int, rng: random.Random,
-                       sperregrense: bool = True) -> dict[str, list[Ballot]]:
-    """One ballot list per district (plus Utjevning when sperregrense is off)."""
-    return {d: simulate(candidates, n, rng) for d, n in split_voters(n_voters, sperregrense).items()}
+def simulate_districts(candidates: list[str], n_voters: int, rng: random.Random) -> dict[str, list[Ballot]]:
+    """One ballot list per district."""
+    return {d: simulate(candidates, n, rng) for d, n in split_voters(n_voters).items()}
 
 
-def parse_split(text: str) -> list[int]:
-    """'1' -> [1], '2,1,1' -> [2, 1, 1]. Positive integers only."""
+NORWAY = "norway"  # split option: modified Sainte-Lague per district, like the Storting count
+MJ_SUPPORT_GRADE = Grade.GOOD  # under --split norway, an MJ "supporter" graded the party this or better
+Split = "list[int] | str"
+
+
+def split_label(weights) -> str:
+    return weights if isinstance(weights, str) else ",".join(map(str, weights))
+
+
+def parse_split(text: str):
+    """'1' -> [1], '2,1,1' -> [2, 1, 1], 'norway' -> NORWAY. Positive integers only."""
+    if text.strip().lower() == NORWAY:
+        return NORWAY
     try:
         weights = [int(x) for x in text.replace(" ", "").split(",") if x != ""]
     except ValueError:
@@ -321,7 +339,7 @@ def parse_split(text: str) -> list[int]:
     return weights
 
 
-def split_seats(seats: int, ranking: list[str], weights: list[int]) -> dict[str, int]:
+def split_seats(seats: int, ranking: list[str], weights: Split) -> dict[str, int]:
     """Share a district's mandates among the top parties in ranking order.
 
     weights [1] = winner takes all. [2, 1, 1] = half / quarter / quarter.
@@ -357,21 +375,33 @@ def _finish(by_district: dict[str, dict[str, int]], candidates: list[str]) -> Se
                        largest=[c for c in candidates if seats[c] == top])
 
 
+def mj_support(ballots: list[Ballot], candidates: list[str]) -> dict[str, int]:
+    """Supporters per party: voters who graded it MJ_SUPPORT_GRADE or better (used by --split norway)."""
+    return {c: sum(1 for g in grades_for(ballots, c) if g == MJ_SUPPORT_GRADE or g.beats(MJ_SUPPORT_GRADE))
+            for c in candidates}
+
+
 def mj_seats(district_ballots: dict[str, list[Ballot]], candidates: list[str],
-             weights: list[int]) -> SeatsResult:
+             weights: Split) -> SeatsResult:
     """Majority Judgment per district; the district's mandates split by weights."""
     by_district = {}
     for d, ballots in district_ballots.items():
+        if weights == NORWAY:
+            by_district[d] = sainte_lague(mj_support(ballots, candidates), seats_in(d))
+            continue
         ranking = [r.name for r in mj_rank(ballots, candidates)]
         by_district[d] = split_seats(seats_in(d), ranking, weights)
     return _finish(by_district, candidates)
 
 
 def plurality_seats(district_votes: dict[str, dict[str, int]], candidates: list[str],
-                    weights: list[int]) -> SeatsResult:
+                    weights: Split) -> SeatsResult:
     """Most votes first per district; the district's mandates split by weights."""
     by_district = {}
     for d, votes in district_votes.items():
+        if weights == NORWAY:
+            by_district[d] = sainte_lague(votes, seats_in(d))
+            continue
         ranking = sorted(candidates, key=lambda c: -votes[c])  # stable: ties keep input order
         by_district[d] = split_seats(seats_in(d), ranking, weights)
     return _finish(by_district, candidates)
@@ -394,7 +424,7 @@ class Election:
     plurality: SeatsResult
     storting: SeatsResult
     sperregrense: bool
-    eligible: list[str]  # parties allowed into the levelling pool (all parties when off)
+    eligible: list[str]  # parties allowed levelling seats (every party when sperregrense is off)
 
     @property
     def districts(self) -> list[str]:
@@ -446,14 +476,23 @@ def levelling_seats(votes: dict[str, int], district_seats: dict[str, int], eligi
 
 
 def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
-              rng: random.Random, weights: list[int], sperregrense: bool = True) -> Election:
-    """Count all three systems. district_ballots must include Utjevning iff sperregrense is off."""
-    if sperregrense == (LEVELLING in district_ballots):
-        raise ValueError("Utjevning ballots must be present exactly when sperregrense is off")
-    district_votes, ambiguous = {}, 0
-    for d, ballots in district_ballots.items():
-        district_votes[d], amb = collect_votes(ballots, candidates, rng)
-        ambiguous += amb
+              rng: random.Random, weights: Split, sperregrense: bool = True,
+              district_votes: dict[str, dict[str, int]] | None = None) -> Election:
+    """Count all three systems: district seats, then the 19 Utjevning levelling seats.
+
+    sperregrense: True = only parties with at least 4% of the national vote get levelling
+    seats; False = every party does.
+    district_votes: real votes per district (CSES). If None, each ballot votes for its
+    top-graded party.
+    """
+    if LEVELLING in district_ballots:
+        raise ValueError(f"{LEVELLING} is not a district; it is filled from national votes")
+    ambiguous = 0
+    if district_votes is None:
+        district_votes = {}
+        for d, ballots in district_ballots.items():
+            district_votes[d], amb = collect_votes(ballots, candidates, rng)
+            ambiguous += amb
     all_ballots = [b for ballots in district_ballots.values() for b in ballots]
     votes = {c: sum(v[c] for v in district_votes.values()) for c in candidates}
     mj_national = mj_rank(all_ballots, candidates)
@@ -462,13 +501,20 @@ def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
     pl = plurality_seats(district_votes, candidates, weights)
     st = storting_seats(district_votes, candidates)
 
-    eligible = list(candidates)
-    if sperregrense:
-        total = sum(votes.values()) or 1
-        eligible = [c for c in candidates if votes[c] / total >= THRESHOLD] or list(candidates)
-        for res in (mj, pl, st):
-            res.by_district[LEVELLING] = levelling_seats(votes, res.seats, eligible)
-        mj, pl, st = (_finish(r.by_district, candidates) for r in (mj, pl, st))
+    def eligible_for(support: dict[str, int]) -> list[str]:
+        if not sperregrense:
+            return list(candidates)
+        total = sum(support.values()) or 1
+        return [c for c in candidates if support[c] / total >= THRESHOLD] or list(candidates)
+
+    eligible = eligible_for(votes)
+    for res in (pl, st):
+        res.by_district[LEVELLING] = levelling_seats(votes, res.seats, eligible)
+    # Under the Norwegian split MJ measures everything in supporters (Good or better),
+    # so its fair share and threshold use supporters too. Otherwise votes, like the rest.
+    mj_measure = mj_support(all_ballots, candidates) if weights == NORWAY else votes
+    mj.by_district[LEVELLING] = levelling_seats(mj_measure, mj.seats, eligible_for(mj_measure))
+    mj, pl, st = (_finish(r.by_district, candidates) for r in (mj, pl, st))
 
     return Election(
         district_ballots=district_ballots,
@@ -484,20 +530,135 @@ def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
     )
 
 
+# ---------------------------------------------------------------- cses data (real norwegian voters)
+
+CSES_ZIP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "cses_imd_csv.zip")
+CSES_CACHE = os.path.join(os.path.dirname(CSES_ZIP), "cses_norway.csv")
+CSES_YEARS = [1997, 2001, 2005, 2009, 2013, 2017]
+CSES_SLOTS = "ABCDEFGHI"
+# CSES party codes for Norway. Names inferred by matching each code's survey vote share
+# to the official result year by year (e.g. 5780001 is the largest party in 1997-2013).
+CSES_PARTIES = {
+    "5780001": "Ap", "5780002": "Høyre", "5780003": "Frp", "5780004": "SV", "5780005": "MDG",
+    "5780006": "Sp", "5780007": "KrF", "5780008": "Venstre", "5780009": "Rødt", "5780010": "Kystpartiet",
+}
+# 0-10 like/dislike score -> grade. Reject gets only 0, the other grades two scores each.
+SCORE_TO_GRADE = {
+    10: Grade.EXCELLENT, 9: Grade.EXCELLENT,
+    8: Grade.VERY_GOOD, 7: Grade.VERY_GOOD,
+    6: Grade.GOOD, 5: Grade.GOOD,
+    4: Grade.ACCEPTABLE, 3: Grade.ACCEPTABLE,
+    2: Grade.POOR, 1: Grade.POOR,
+    0: Grade.REJECT,
+}
+CSES_COLUMNS = (["IMD1004", "IMD1008_YEAR", "IMD3002_LH_PL"]
+                + [f"IMD3008_{s}" for s in CSES_SLOTS] + [f"IMD5000_{s}" for s in CSES_SLOTS])
+
+
+def build_cses_cache(zip_path: str = CSES_ZIP, cache_path: str = CSES_CACHE) -> int:
+    """Pull the Norwegian rows and the needed columns out of the 650 MB CSES file. Slow, once."""
+    n = 0
+    with zipfile.ZipFile(zip_path) as z:
+        name = next(m for m in z.namelist() if m.endswith(".csv"))
+        with z.open(name) as raw, open(cache_path, "w", newline="", encoding="utf-8") as out:
+            reader = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8", errors="replace"))
+            writer = csv.DictWriter(out, fieldnames=CSES_COLUMNS)
+            writer.writeheader()
+            for row in reader:
+                if row["IMD1004"].startswith("NOR_"):
+                    writer.writerow({c: row[c] for c in CSES_COLUMNS})
+                    n += 1
+    return n
+
+
+def score_grade(text: str) -> Grade:
+    """'0'..'10' -> grade; anything else (missing, refused, 96-99) counts as Reject."""
+    return SCORE_TO_GRADE.get(int(text), Grade.REJECT) if text.isdigit() else Grade.REJECT
+
+
+def load_cses(year: int, rng: random.Random, zip_path: str = CSES_ZIP,
+              cache_path: str = CSES_CACHE) -> tuple[list[str], list[Ballot], list[str]]:
+    """Real Norwegian respondents for one election year.
+
+    Returns (parties, ballots, votes). Party slots that nobody rated that year are dropped.
+    A respondent's vote is their reported vote if it is one of the rated parties, otherwise
+    the party they rated highest (random among ties).
+    """
+    if year not in CSES_YEARS:
+        raise ValueError(f"CSES has Norway for {CSES_YEARS}, not {year}")
+    if not os.path.exists(cache_path):
+        if not os.path.exists(zip_path):
+            raise FileNotFoundError(f"{zip_path} not found; download cses_imd_csv.zip from cses.org into data/")
+        print(f"first run: extracting Norway from {os.path.basename(zip_path)} ... (a minute or two)")
+        build_cses_cache(zip_path, cache_path)
+    with open(cache_path, newline="", encoding="utf-8") as f:
+        rows = [r for r in csv.DictReader(f) if r["IMD1008_YEAR"] == str(year)]
+    if not rows:
+        raise ValueError(f"no Norwegian respondents for {year} in {cache_path}")
+
+    # party in each slot: the code used that year; slots never rated are dropped
+    slot_party: dict[str, str] = {}
+    for s in CSES_SLOTS:
+        codes = {r[f"IMD5000_{s}"] for r in rows} - {"9999999", ""}
+        rated = any(r[f"IMD3008_{s}"].isdigit() and int(r[f"IMD3008_{s}"]) <= 10 for r in rows)
+        if len(codes) == 1 and rated:
+            code = codes.pop()
+            slot_party[s] = CSES_PARTIES.get(code, f"party {code}")
+    parties = list(slot_party.values())
+    code_to_party = {code: CSES_PARTIES.get(code, f"party {code}") for code in CSES_PARTIES}
+
+    ballots: list[Ballot] = []
+    votes: list[str] = []
+    for r in rows:
+        ballot = {party: score_grade(r[f"IMD3008_{s}"]) for s, party in slot_party.items()}
+        ballots.append(ballot)
+        reported = code_to_party.get(r["IMD3002_LH_PL"])
+        votes.append(reported if reported in parties else vote_from_ballot(ballot, parties, rng)[0])
+    return parties, ballots, votes
+
+
+def cses_election(year: int, rng: random.Random, weights: Split, sperregrense: bool = True,
+                  zip_path: str = CSES_ZIP, cache_path: str = CSES_CACHE) -> tuple[list[str], Election]:
+    """Spread the real respondents over the districts by population and count all systems."""
+    parties, ballots, votes = load_cses(year, rng, zip_path, cache_path)
+    shares = split_voters(len(ballots))
+    if len(ballots) < len(shares):
+        raise ValueError(f"need at least {len(shares)} respondents, got {len(ballots)}")
+    biggest = max(shares, key=shares.get)
+    for d in shares:  # every district needs at least one respondent for the median to exist
+        if shares[d] == 0:
+            shares[d] += 1
+            shares[biggest] -= 1
+    order = list(range(len(ballots)))
+    rng.shuffle(order)
+    district_ballots: dict[str, list[Ballot]] = {}
+    district_votes: dict[str, dict[str, int]] = {}
+    pos = 0
+    for d, n in shares.items():
+        idx = order[pos:pos + n]
+        pos += n
+        district_ballots[d] = [ballots[i] for i in idx]
+        counts = {p: 0 for p in parties}
+        for i in idx:
+            counts[votes[i]] += 1
+        district_votes[d] = counts
+    return parties, count_all(district_ballots, parties, rng, weights, sperregrense, district_votes)
+
+
 # ---------------------------------------------------------------- cli
 
-def print_report(e: Election, candidates: list[str], weights: list[int]) -> None:
+def print_report(e: Election, candidates: list[str], weights: Split) -> None:
     n = e.n_voters
     width = max(len(c) for c in candidates)
     S = STORTING_SEATS
 
-    mode = (f"sperregrense ON: {LEVELLING_SEATS} Utjevning mandates on national votes, parties >= {THRESHOLD:.0%}: "
+    mode = (f"sperregrense ON: {LEVELLING_SEATS} {LEVELLING} levelling mandates only for parties >= {THRESHOLD:.0%}: "
             f"{', '.join(e.eligible)}" if e.sperregrense
-            else f"sperregrense OFF: {LEVELLING} is a 20th district with its own {len(e.district_ballots[LEVELLING])} voters")
+            else f"sperregrense OFF: {LEVELLING_SEATS} {LEVELLING} levelling mandates open to every party")
     print(mode)
     print()
     header = " ".join(f"{g.label:>10}" for g in GRADES_DESC)
-    print(f"Majority Judgment  ({n} voters, {len(DISTRICTS)} districts + {LEVELLING}, split {','.join(map(str, weights))})")
+    print(f"Majority Judgment  ({n} voters, {len(DISTRICTS)} districts + {LEVELLING}, split {split_label(weights)})")
     print(f"{'':{width}} {header}   majority      p      q   seats")
     for r in e.mj_national:
         row = " ".join(f"{r.counts[g]:>10}" for g in GRADES_DESC)
@@ -505,7 +666,7 @@ def print_report(e: Election, candidates: list[str], weights: list[int]) -> None
     print(f"Largest party: {' = '.join(e.mj.largest)}")
     print()
 
-    print(f"Plurality  (split {','.join(map(str, weights))})")
+    print(f"Plurality  (split {split_label(weights)})")
     for c in sorted(candidates, key=lambda c: -e.plurality.seats[c]):
         print(f"{c:{width}} {e.votes[c]:>7} votes ({e.votes[c] / n:5.1%})   {e.plurality.seats[c]:>3} seats ({e.plurality.seats[c] / S:5.1%})")
     print(f"Largest party: {' = '.join(e.plurality.largest)}  (ambiguous ballots: {e.ambiguous})")
@@ -526,7 +687,7 @@ def print_report(e: Election, candidates: list[str], weights: list[int]) -> None
         voters = str(len(e.district_ballots[d])) if d in e.district_ballots else "national"
         print(f"{d:{dw}}  {seats_in(d):>5}  {voters:>8}  "
               f"{top(e.mj):{width}}  {top(e.plurality):{width}}  {top(e.storting):{width}}")
-    if e.sperregrense:
+    if True:
         print()
         print(f"{LEVELLING} (levelling, fair share minus district seats):")
         for name, res in (("Majority Judgment", e.mj), ("Plurality", e.plurality), ("Storting", e.storting)):
@@ -546,19 +707,26 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--candidates", nargs="+", default=["Far-left", "Center", "Far-right"])
     ap.add_argument("--voters", type=int, default=10000)
     ap.add_argument("--sperregrense", action=argparse.BooleanOptionalAction, default=True,
-                    help="on: 19 Utjevning mandates by national votes for parties >= 4%%; "
-                         "off: Utjevning is a 20th district with its own voters")
+                    help="on: only parties >= 4%% get Utjevning levelling mandates; off: every party does")
     ap.add_argument("--split", default="1",
-                    help="mandate split among top parties per district: 1 (winner takes all), 2,1,1 or 3,2,1")
+                    help="mandate split per district: 1 (winner takes all), 2,1,1, 3,2,1 or norway "
+                         "(modified Sainte-Lague, like the Storting count)")
+    ap.add_argument("--cses", type=int, metavar="YEAR", choices=CSES_YEARS,
+                    help="use real Norwegian voters from CSES for this election year instead of random ones")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args(argv)
 
     weights = parse_split(args.split)
     rng = random.Random(args.seed)
-    district_ballots = simulate_districts(args.candidates, args.voters, rng, args.sperregrense)
-    e = count_all(district_ballots, args.candidates, rng, weights, args.sperregrense)
-    print(f"seed {args.seed}")
-    print_report(e, args.candidates, weights)
+    if args.cses:
+        candidates, e = cses_election(args.cses, rng, weights, args.sperregrense)
+        print(f"CSES Norway {args.cses}: {e.n_voters} real respondents, parties {', '.join(candidates)}, seed {args.seed}")
+    else:
+        candidates = args.candidates
+        district_ballots = simulate_districts(candidates, args.voters, rng)
+        e = count_all(district_ballots, candidates, rng, weights, args.sperregrense)
+        print(f"seed {args.seed}")
+    print_report(e, candidates, weights)
 
 
 if __name__ == "__main__":

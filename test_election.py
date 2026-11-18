@@ -23,10 +23,15 @@ from election import (
     simulate_districts,
     split_seats,
     split_voters,
+    NORWAY,
     LEVELLING,
     LEVELLING_SEATS,
     levelling_seats,
     seats_in,
+    SCORE_TO_GRADE,
+    load_cses,
+    cses_election,
+    score_grade,
 )
 
 G = Grade
@@ -178,6 +183,7 @@ def test_split_seats_rules():
 
 
 def test_parse_split():
+    assert parse_split("norway") == NORWAY and parse_split(" Norway ") == NORWAY
     assert parse_split("1") == [1]
     assert parse_split("2, 1,1") == [2, 1, 1]
     with pytest.raises(ValueError):
@@ -197,9 +203,6 @@ def test_split_voters_sums_and_is_proportional():
     assert sum(v.values()) == 10000
     assert v["Oslo"] > 8 * v["Finnmark"]
     assert LEVELLING not in v
-    v_off = split_voters(10000, sperregrense=False)
-    assert sum(v_off.values()) == 10000
-    assert 1100 < v_off[LEVELLING] < 1300  # 19 of 169 mandates' worth of voters
 
 
 def test_seats_in():
@@ -211,9 +214,9 @@ def test_seats_in():
 def test_all_systems_hand_out_169_seats_both_modes():
     parties = ["A", "B", "C"]
     for sperregrense in (True, False):
-        db = simulate_districts(parties, 5000, random.Random(4), sperregrense)
+        db = simulate_districts(parties, 5000, random.Random(4))
         assert sum(len(b) for b in db.values()) == 5000
-        assert (LEVELLING in db) == (not sperregrense)
+        assert LEVELLING not in db
         for weights in ([1], [2, 1, 1], [3, 2, 1]):
             e = count_all(db, parties, random.Random(0), weights, sperregrense)
             for res in (e.mj, e.plurality, e.storting):
@@ -223,10 +226,11 @@ def test_all_systems_hand_out_169_seats_both_modes():
             assert sum(e.votes.values()) == 5000
 
 
-def test_count_all_rejects_mismatched_mode():
-    db = simulate_districts(["A", "B"], 200, random.Random(0), sperregrense=True)
+def test_count_all_rejects_utjevning_ballots():
+    db = simulate_districts(["A", "B"], 200, random.Random(0))
+    db[LEVELLING] = db["Oslo"]
     with pytest.raises(ValueError):
-        count_all(db, ["A", "B"], random.Random(0), [1], sperregrense=False)
+        count_all(db, ["A", "B"], random.Random(0), [1])
 
 
 def test_sperregrense_blocks_small_party_from_pool():
@@ -247,10 +251,14 @@ def test_sperregrense_blocks_small_party_from_pool():
     assert e_on.plurality.by_district[LEVELLING]["C"] == 0
     assert e_on.storting.by_district[LEVELLING]["C"] == 0
 
-    db_off = {**db_on, LEVELLING: ballots(100)}
-    e_off = count_all(db_off, parties, random.Random(0), [3, 2, 1], False)
+    # OFF: C is eligible. Under Storting it has no district seats and 2% of the vote,
+    # so levelling tops it up to its fair share. (Under the 3,2,1 split C already holds
+    # third-place district seats above its fair share, so it gets none there.)
+    e_off = count_all(db_on, parties, random.Random(0), [3, 2, 1], False)
     assert e_off.eligible == parties
-    assert e_off.mj.by_district[LEVELLING]["C"] == 3  # third place gets the "least" share
+    assert e_off.storting.by_district[LEVELLING]["C"] > 0
+    for res in (e_off.mj, e_off.plurality, e_off.storting):
+        assert sum(res.by_district[LEVELLING].values()) == 19
 
 
 def test_levelling_fills_deficit():
@@ -277,7 +285,7 @@ def test_levelling_fills_deficit():
 
 def test_levelling_makes_storting_proportional():
     parties = ["A", "B", "C"]
-    db = simulate_districts(parties, 20000, random.Random(11), True)
+    db = simulate_districts(parties, 20000, random.Random(11))
     e = count_all(db, parties, random.Random(0), [1], True)
     total = sum(e.votes.values())
     for c in parties:
@@ -310,3 +318,96 @@ def test_bullet_voters_only_flip_median_past_half():
     assert majority_grade(grades_for(honest + attack, "A")) == G.GOOD
     attack = [{"A": G.REJECT} for _ in range(101)]
     assert majority_grade(grades_for(honest + attack, "A")) == G.REJECT
+
+
+def test_score_to_grade_mapping():
+    assert SCORE_TO_GRADE[10] == SCORE_TO_GRADE[9] == G.EXCELLENT
+    assert SCORE_TO_GRADE[0] == G.REJECT and SCORE_TO_GRADE[1] == G.POOR
+    assert score_grade("7") == G.VERY_GOOD
+    for missing in ("", "96", "98", "99", "abc"):
+        assert score_grade(missing) == G.REJECT
+
+
+def _write_cache(path, repeat=1):
+    import csv
+    cols = (["IMD1004", "IMD1008_YEAR", "IMD3002_LH_PL"]
+            + [f"IMD3008_{s}" for s in "ABCDEFGHI"] + [f"IMD5000_{s}" for s in "ABCDEFGHI"])
+    codes = ["5780001", "5780002", "5780003"] + ["9999999"] * 6
+    rows = [
+        # vote Ap, scores Ap 10, Høyre 5, Frp 0
+        ("5780001", ["10", "5", "0"]),
+        # vote missing -> highest rated (Høyre 9)
+        ("9999999", ["3", "9", "1"]),
+        # vote for a party not rated this year -> highest rated (Frp 8)
+        ("5780009", ["2", "99", "8"]),
+    ]
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for vote, scores in rows * repeat:
+            row = {"IMD1004": "NOR_2017", "IMD1008_YEAR": "2017", "IMD3002_LH_PL": vote}
+            for i, s in enumerate("ABCDEFGHI"):
+                row[f"IMD3008_{s}"] = scores[i] if i < 3 else "99"
+                row[f"IMD5000_{s}"] = codes[i]
+            w.writerow(row)
+
+
+def test_load_cses_from_cache(tmp_path):
+    cache = tmp_path / "cache.csv"
+    _write_cache(cache)
+    parties, ballots, votes = load_cses(2017, random.Random(0), zip_path="missing.zip", cache_path=str(cache))
+    assert parties == ["Ap", "Høyre", "Frp"]  # empty slots dropped
+    assert ballots[0] == {"Ap": G.EXCELLENT, "Høyre": G.GOOD, "Frp": G.REJECT}
+    assert ballots[2]["Høyre"] == G.REJECT  # missing score counts as Reject
+    assert votes == ["Ap", "Høyre", "Frp"]
+    with pytest.raises(ValueError):
+        load_cses(2013, random.Random(0), zip_path="missing.zip", cache_path=str(cache))
+    with pytest.raises(ValueError):
+        load_cses(2000, random.Random(0), zip_path="missing.zip", cache_path=str(cache))
+
+
+def test_cses_election_counts_real_votes(tmp_path):
+    cache = tmp_path / "cache.csv"
+    _write_cache(cache, repeat=14)  # 42 respondents, 14 per pattern
+    parties, e = cses_election(2017, random.Random(0), [1], True, zip_path="missing.zip", cache_path=str(cache))
+    assert e.n_voters == 42
+    assert e.votes == {"Ap": 14, "Høyre": 14, "Frp": 14}
+    assert all(len(b) >= 1 for b in e.district_ballots.values())
+    for res in (e.mj, e.plurality, e.storting):
+        assert sum(res.seats.values()) == 169
+    # too few respondents for 19 districts
+    small = tmp_path / "small.csv"
+    _write_cache(small, repeat=2)
+    with pytest.raises(ValueError):
+        cses_election(2017, random.Random(0), [1], True, zip_path="missing.zip", cache_path=str(small))
+
+
+def test_norway_split_matches_storting_for_plurality():
+    parties = ["A", "B", "C"]
+    db = simulate_districts(parties, 5000, random.Random(9))
+    e = count_all(db, parties, random.Random(0), NORWAY, True)
+    assert e.plurality.by_district == e.storting.by_district
+    assert e.plurality.seats == e.storting.seats
+    for res in (e.mj, e.plurality, e.storting):
+        assert sum(res.seats.values()) == 169
+
+
+def test_norway_split_mj_uses_good_or_better():
+    parties = ["A", "B"]
+    # Everyone grades A Good and B Acceptable: only A has supporters, so A takes every district seat.
+    db = {d: [{"A": G.GOOD, "B": G.ACCEPTABLE}] * 20 for d in DISTRICTS}
+    e = count_all(db, parties, random.Random(0), NORWAY, True)
+    assert all(v["A"] == seats_in(d) and v["B"] == 0 for d, v in e.mj.by_district.items() if d != LEVELLING)
+    # Half grade A Excellent / B Poor, half grade B Very Good / A Acceptable: supporters 10 vs 10
+    db = {d: [{"A": G.EXCELLENT, "B": G.POOR}] * 10 + [{"A": G.ACCEPTABLE, "B": G.VERY_GOOD}] * 10 for d in DISTRICTS}
+    e = count_all(db, parties, random.Random(0), NORWAY, True)
+    assert abs(e.mj.seats["A"] - e.mj.seats["B"]) <= 19  # proportional, not winner takes all
+
+
+def test_norway_split_mj_levelling_uses_supporters():
+    parties = ["A", "B"]
+    # Everyone's favourite is A (all votes), but everyone also grades B Good: supporters 20 vs 20.
+    db = {d: [{"A": G.EXCELLENT, "B": G.GOOD}] * 20 for d in DISTRICTS}
+    e = count_all(db, parties, random.Random(0), NORWAY, True)
+    assert e.storting.seats == {"A": 169, "B": 0}  # votes: A has them all
+    assert abs(e.mj.seats["A"] - e.mj.seats["B"]) <= 1  # supporters: equal, after levelling too

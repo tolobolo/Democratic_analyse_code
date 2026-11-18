@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 from election import (
+    CSES_YEARS,
     GRADES_DESC,
     LEVELLING,
     LEVELLING_SEATS,
@@ -23,8 +24,10 @@ from election import (
     THRESHOLD,
     Grade,
     count_all,
+    cses_election,
     parse_split,
     seats_in,
+    split_label,
     simulate_districts,
 )
 
@@ -40,6 +43,7 @@ GRADE_COLOUR = {
 }
 
 DEFAULTS = {
+    "source": "random",
     "candidates": "Far-left\nCenter\nFar-right",
     "voters": "10000",
     "seed": "42",
@@ -89,18 +93,19 @@ are then counted three ways, district by district, and every system hands out th
 <b>Plurality</b> ranks them by votes (each voter's favourite).
 In both, the district's mandates go to the winner, or are shared by the split rule you choose.
 <b>Storting</b> uses Norway's real district count: modified Sainte-Lagu&euml; with the 2025 seat numbers.
-Each district gives up one mandate; those 19 are the <b>Utjevning</b> mandates, handled by the sperregrense switch.
+Each district gives up one mandate; those 19 are the <b>Utjevning</b> levelling mandates, which top parties up to
+their fair national share. The sperregrense switch decides whether a party needs 4% of the vote to get them.
 Change the settings and press Run to see where the systems agree or disagree.</p>
 
 <form method="post" action="/">
   <fieldset>
     <legend>Rules</legend>
     <label>Sperregrense (4% threshold)</label>
-    <span class="hint"><b>On:</b> the 19 Utjevning mandates are levelling seats, as in Norway. Every party with at least
-    4% of the national vote gets its fair share of 169 seats (by national votes) minus the seats it already won in
-    the districts, so the districts' distortions are evened out. Parties already above their fair share get none.<br>
-    <b>Off:</b> Utjevning becomes a 20th district with its own freshly made voters and 19 mandates, counted exactly
-    like every other district. No threshold anywhere.</span>
+    <span class="hint">The 19 Utjevning mandates are levelling seats, as in Norway: a party gets its fair share of
+    169 seats (by national votes) minus the seats it already won in the districts, so the districts' distortions are
+    evened out. Parties already above their fair share get none.<br>
+    <b>On:</b> only parties with at least 4% of the national vote can get levelling seats.<br>
+    <b>Off:</b> every party can, no matter how small.</span>
     <label><input type="radio" name="sperregrense" value="on" {sperre_on}> On</label>
     <label><input type="radio" name="sperregrense" value="off" {sperre_off}> Off</label>
 
@@ -110,6 +115,10 @@ Change the settings and press Run to see where the systems agree or disagree.</p
     <label><input type="radio" name="split" value="1" {split_1}> Winner takes all</label>
     <label><input type="radio" name="split" value="2,1,1" {split_211}> Half to the winner, a quarter each to 2nd and 3rd</label>
     <label><input type="radio" name="split" value="3,2,1" {split_321}> Most / ok / least to the top three (3:2:1)</label>
+    <label><input type="radio" name="split" value="norway" {split_norway}> Norwegian: modified Sainte-Lagu&euml; per district</label>
+    <span class="hint">Same split as the Storting count (divide by 1.4, 3, 5, ...). Plurality then equals the Storting
+    count. Majority Judgment shares on supporters, i.e. voters who graded the party Good or better, because grades
+    give no vote count. With this option the only difference between the systems is how voters express themselves.</span>
     <label><input type="radio" name="split" value="custom" {split_custom_checked}> Custom weights:
       <input type="text" name="split_custom" value="{split_custom}" placeholder="e.g. 4,2,1,1" style="width:8rem"></label>
     <span class="hint">Weights in ranking order, parties beyond the list get nothing. Rounded by largest remainder.</span>
@@ -117,8 +126,15 @@ Change the settings and press Run to see where the systems agree or disagree.</p
 
   <fieldset>
     <legend>Candidates and voters</legend>
+    <label>Voters</label>
+    <span class="hint"><b>Random</b> makes up voters as described above. <b>CSES</b> uses real Norwegian survey
+    respondents from the Comparative Study of Electoral Systems: their 0-10 like/dislike score for each party becomes
+    the grade (9-10 Excellent, 7-8 Very Good, 5-6 Good, 3-4 Acceptable, 1-2 Poor, 0 Reject, no answer Reject) and
+    their reported vote is the plurality/Storting vote. With CSES the parties and voter count below are ignored.
+    Respondents are spread over the districts at random by population.</span>
+    <select name="source">{source_options}</select>
     <label>Parties / candidates</label>
-    <span class="hint">One name per line.</span>
+    <span class="hint">One name per line (random voters only).</span>
     <textarea name="candidates">{candidates}</textarea>
     <label>Number of voters</label>
     <span class="hint">How many random voters to create, spread over the districts by population
@@ -160,22 +176,28 @@ def run(form: dict[str, str]) -> str:
         raise ValueError("number of voters must be at least 1")
     seed = int(form["seed"])
     rng = random.Random(seed)
-    names = parse_candidates(form["candidates"])
     weights = parse_split(form["split_custom"] if form["split"] == "custom" else form["split"])
     sperre = form["sperregrense"] != "off"
-    e = count_all(simulate_districts(names, voters, rng, sperre), names, rng, weights, sperre)
+    if form["source"].startswith("cses_"):
+        year = int(form["source"][5:])
+        names, e = cses_election(year, rng, weights, sperre)
+        source_txt = f"CSES Norway {year}, real survey respondents"
+    else:
+        names = parse_candidates(form["candidates"])
+        e = count_all(simulate_districts(names, voters, rng), names, rng, weights, sperre)
+        source_txt = "random voters"
     n = e.n_voters
     S = STORTING_SEATS
-    split_txt = ",".join(map(str, weights))
+    split_txt = split_label(weights)
     if sperre:
         mode = (f"Sperregrense on: the {LEVELLING_SEATS} {LEVELLING} mandates are levelling seats. Each party with at "
                 f"least {THRESHOLD:.0%} of the national vote ({html.escape(', '.join(e.eligible))}) gets its fair "
                 "national share of 169 seats minus what it already won in the districts. Parties already above "
                 "their fair share get none. The split rule does not apply to these seats.")
     else:
-        mode = (f"Sperregrense off: {LEVELLING} is a 20th district with {len(e.district_ballots[LEVELLING])} voters "
-                f"and {LEVELLING_SEATS} mandates.")
-    setup = f"{n} voters over 19 districts, seed {seed}, split {split_txt}. {mode}"
+        mode = (f"Sperregrense off: the {LEVELLING_SEATS} {LEVELLING} mandates are levelling seats open to every party. "
+                "Each party gets its fair national share of 169 seats minus what it already won in the districts.")
+    setup = f"{source_txt}: {n} voters over 19 districts, seed {seed}, split {split_txt}. {mode}"
 
     out = [f'<p class="rule">{setup}</p>']
 
@@ -251,7 +273,7 @@ def run(form: dict[str, str]) -> str:
                "<th>Plurality</th><th>Storting</th></tr>")
 
     def top(res, d):
-        if d == LEVELLING and sperre:  # levelling: show every party's share
+        if d == LEVELLING:  # levelling: show every party's share
             return html.escape(", ".join(f"{c} {n}" for c, n in res.by_district[d].items() if n)) or "-"
         best = max(res.by_district[d].values())
         return html.escape(" = ".join(c for c in names if res.by_district[d][c] == best)) + f" ({best})"
@@ -266,7 +288,11 @@ def run(form: dict[str, str]) -> str:
 
 def render(form: dict[str, str], result: str = "") -> bytes:
     split = form["split"]
+    sources = [("random", "Random voters")] + [(f"cses_{y}", f"CSES Norway {y}") for y in CSES_YEARS]
+    source_options = "".join(
+        f'<option value="{v}" {"selected" if form["source"] == v else ""}>{label}</option>' for v, label in sources)
     page = PAGE.format(
+        source_options=source_options,
         candidates=html.escape(form["candidates"]),
         voters=html.escape(form["voters"]),
         seed=html.escape(form["seed"]),
@@ -275,6 +301,7 @@ def render(form: dict[str, str], result: str = "") -> bytes:
         split_1="checked" if split == "1" else "",
         split_211="checked" if split == "2,1,1" else "",
         split_321="checked" if split == "3,2,1" else "",
+        split_norway="checked" if split == "norway" else "",
         split_custom_checked="checked" if split == "custom" else "",
         split_custom=html.escape(form["split_custom"]),
         result=result,
@@ -299,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
         form = {k: data.get(k, [v])[0] for k, v in DEFAULTS.items()}
         try:
             result = run(form)
-        except ValueError as e:
+        except (ValueError, FileNotFoundError) as e:
             result = f'<div class="error">Invalid input: {html.escape(str(e))}</div>'
         self._send(render(form, result))
 
