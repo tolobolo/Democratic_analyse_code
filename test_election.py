@@ -382,14 +382,19 @@ def test_cses_election_counts_real_votes(tmp_path):
         cses_election(2017, random.Random(0), [1], True, zip_path="missing.zip", cache_path=str(small))
 
 
-def test_norway_split_matches_storting_for_plurality():
+def test_plurality_is_always_winner_takes_all():
     parties = ["A", "B", "C"]
     db = simulate_districts(parties, 5000, random.Random(9))
-    e = count_all(db, parties, random.Random(0), NORWAY, True)
-    assert e.plurality.by_district == e.storting.by_district
-    assert e.plurality.seats == e.storting.seats
-    for res in (e.mj, e.plurality, e.storting):
-        assert sum(res.seats.values()) == 169
+    results = [count_all(db, parties, random.Random(0), w, True) for w in ([1], [2, 1, 1], NORWAY)]
+    for e in results:
+        assert e.plurality.by_district == results[0].plurality.by_district
+        assert e.storting.by_district == results[0].storting.by_district
+        for d, seats in e.plurality.by_district.items():
+            if d != LEVELLING:
+                assert sorted(seats.values())[-2] == 0  # one party has everything in the district
+        for res in (e.mj, e.plurality, e.storting):
+            assert sum(res.seats.values()) == 169
+    assert results[0].mj.by_district != results[2].mj.by_district  # split does change MJ
 
 
 def test_norway_split_mj_uses_good_or_better():

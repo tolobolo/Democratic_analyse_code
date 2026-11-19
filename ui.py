@@ -91,8 +91,8 @@ Very Good down to Reject, with no hidden logic, because real people do not follo
 are then counted three ways, district by district, and every system hands out the 169 mandates.
 <b>Majority Judgment</b> ranks the parties in each district by median grade.
 <b>Plurality</b> ranks them by votes (each voter's favourite).
-In both, the district's mandates go to the winner, or are shared by the split rule you choose.
 <b>Storting</b> uses Norway's real district count: modified Sainte-Lagu&euml; with the 2025 seat numbers.
+Under Majority Judgment the district's mandates go by the split rule you choose; under plurality the winner takes them all.
 Each district gives up one mandate; those 19 are the <b>Utjevning</b> levelling mandates, which top parties up to
 their fair national share. The sperregrense switch decides whether a party needs 4% of the vote to get them.
 Change the settings and press Run to see where the systems agree or disagree.</p>
@@ -109,16 +109,16 @@ Change the settings and press Run to see where the systems agree or disagree.</p
     <label><input type="radio" name="sperregrense" value="on" {sperre_on}> On</label>
     <label><input type="radio" name="sperregrense" value="off" {sperre_off}> Off</label>
 
-    <label>Mandate split per district</label>
-    <span class="hint">How a district's mandates are shared under Majority Judgment and plurality.
-    The Storting count always uses Norway's own rule and ignores this.</span>
+    <label>Mandate split per district (Majority Judgment only)</label>
+    <span class="hint">How a district's mandates are shared under Majority Judgment. The Storting count always uses
+    Norway's own Sainte-Lagu&euml; rule and plurality is always winner takes all; both ignore this setting.</span>
     <label><input type="radio" name="split" value="1" {split_1}> Winner takes all</label>
     <label><input type="radio" name="split" value="2,1,1" {split_211}> Half to the winner, a quarter each to 2nd and 3rd</label>
     <label><input type="radio" name="split" value="3,2,1" {split_321}> Most / ok / least to the top three (3:2:1)</label>
     <label><input type="radio" name="split" value="norway" {split_norway}> Norwegian: modified Sainte-Lagu&euml; per district</label>
-    <span class="hint">Same split as the Storting count (divide by 1.4, 3, 5, ...). Plurality then equals the Storting
-    count. Majority Judgment shares on supporters, i.e. voters who graded the party Good or better, because grades
-    give no vote count. With this option the only difference between the systems is how voters express themselves.</span>
+    <span class="hint">Same split as the Storting count (divide by 1.4, 3, 5, ...), applied to supporters, i.e. voters
+    who graded the party Good or better, because grades give no vote count. With this option the only difference
+    between Majority Judgment and the Storting count is how voters express themselves.</span>
     <label><input type="radio" name="split" value="custom" {split_custom_checked}> Custom weights:
       <input type="text" name="split_custom" value="{split_custom}" placeholder="e.g. 4,2,1,1" style="width:8rem"></label>
     <span class="hint">Weights in ranking order, parties beyond the list get nothing. Rounded by largest remainder.</span>
@@ -236,26 +236,13 @@ def run(form: dict[str, str]) -> str:
     out.append("</table>")
     out.append(f'<p>Largest party: <b>{html.escape(" = ".join(e.mj.largest))}</b></p>')
 
-    out.append("<h2>Plurality</h2>")
-    out.append('<p class="rule">The same ballots, counted the old way: each voter gets one vote for the party they '
-               "graded highest. In each district the parties are ranked by votes and the mandates go by the split "
-               f"rule ({split_txt}). When a voter gave the same top grade to several parties one is picked at random. "
-               f"That happened on {e.ambiguous} of {n} ballots.</p>")
-    out.append("<table><tr><th>Party</th><th>Votes</th><th>Vote share</th><th>Seats</th><th>Seat share</th><th></th></tr>")
-    top_pl = max(e.plurality.seats.values())
-    for c in sorted(names, key=lambda c: -e.plurality.seats[c]):
-        sseats = e.plurality.seats[c]
-        out.append(f"<tr><td>{html.escape(c)}</td><td>{e.votes[c]}</td><td>{e.votes[c] / n:.1%}</td>"
-                   f"<td><b>{sseats}</b></td><td>{sseats / S:.1%}</td><td>{seat_bar(sseats, top_pl, '#2563eb')}</td></tr>")
-    out.append("</table>")
-    out.append(f'<p>Largest party: <b>{html.escape(" = ".join(e.plurality.largest))}</b></p>')
-
     out.append("<h2>Storting (Norwegian system)</h2>")
-    out.append('<p class="rule">The same votes as plurality, counted district by district the way Norway does it: '
-               "each party's votes are divided by 1.4, then 3, 5, 7, ... and the district's mandates go one by one "
-               "to the highest result. This is modified Sainte-Lagu&euml; (not D'Hondt, which divides by 1, 2, 3). "
+    out.append('<p class="rule">Each voter\'s favourite is their vote, counted district by district the way Norway '
+               "does it: each party's votes are divided by 1.4, then 3, 5, 7, ... and the district's mandates go one "
+               "by one to the highest result. This is modified Sainte-Lagu&euml; (not D'Hondt, which divides by 1, 2, 3). "
                "The 1.4 makes the first seat harder to win for small parties. Uses the official 2025 seat count per "
-               "district. The 19 levelling seats and the 4% threshold are not modelled.</p>")
+               "district, plus the 19 Utjevning levelling seats and the sperregrense switch above. The split setting "
+               "never applies here.</p>")
     out.append("<table><tr><th>Party</th><th>Votes</th><th>Vote share</th><th>Seats</th><th>Seat share</th><th></th></tr>")
     top_st = max(e.storting.seats.values())
     for c in sorted(names, key=lambda c: -e.storting.seats[c]):
@@ -265,12 +252,26 @@ def run(form: dict[str, str]) -> str:
     out.append("</table>")
     out.append(f'<p>Largest party: <b>{html.escape(" = ".join(e.storting.largest))}</b></p>')
 
+    out.append("<h2>Plurality</h2>")
+    out.append('<p class="rule">The same votes as the Storting count, counted the old way: in each district the '
+               "party with the most votes takes all of the district's mandates (first past the post). When a voter "
+               f"gave the same top grade to several parties one is picked at random. That happened on {e.ambiguous} "
+               f"of {n} ballots.</p>")
+    out.append("<table><tr><th>Party</th><th>Votes</th><th>Vote share</th><th>Seats</th><th>Seat share</th><th></th></tr>")
+    top_pl = max(e.plurality.seats.values())
+    for c in sorted(names, key=lambda c: -e.plurality.seats[c]):
+        sseats = e.plurality.seats[c]
+        out.append(f"<tr><td>{html.escape(c)}</td><td>{e.votes[c]}</td><td>{e.votes[c] / n:.1%}</td>"
+                   f"<td><b>{sseats}</b></td><td>{sseats / S:.1%}</td><td>{seat_bar(sseats, top_pl, '#2563eb')}</td></tr>")
+    out.append("</table>")
+    out.append(f'<p>Largest party: <b>{html.escape(" = ".join(e.plurality.largest))}</b></p>')
+
     out.append("<h2>Districts</h2>")
     out.append('<p class="rule">Who comes first in each district under each system, with seats won there in brackets. '
                f"Each district counts one mandate less than its official number; the {LEVELLING} row holds those "
                f"{LEVELLING_SEATS}.</p>")
     out.append("<table><tr><th>District</th><th>Mandates</th><th>Voters</th><th>Majority Judgment</th>"
-               "<th>Plurality</th><th>Storting</th></tr>")
+               "<th>Storting</th><th>Plurality</th></tr>")
 
     def top(res, d):
         if d == LEVELLING:  # levelling: show every party's share
@@ -281,7 +282,7 @@ def run(form: dict[str, str]) -> str:
     for d in e.districts:
         voters_txt = str(len(e.district_ballots[d])) if d in e.district_ballots else "national votes"
         out.append(f"<tr><td>{html.escape(d)}</td><td>{seats_in(d)}</td><td>{voters_txt}</td>"
-                   f"<td>{top(e.mj, d)}</td><td>{top(e.plurality, d)}</td><td>{top(e.storting, d)}</td></tr>")
+                   f"<td>{top(e.mj, d)}</td><td>{top(e.storting, d)}</td><td>{top(e.plurality, d)}</td></tr>")
     out.append("</table>")
     return "\n".join(out)
 

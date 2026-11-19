@@ -7,22 +7,23 @@ Voters are spread over Norway's 19 Storting districts by population. Each distri
 gives up one mandate (150 stay in the districts), and every system is counted per
 district so that all three hand out the 169 mandates:
   Majority Judgment  district ranking by median grade, mandates by --split
-  Plurality          district ranking by votes (the favourite), mandates by --split
   Storting (Norway)  modified Sainte-Lague (1.4, 3, 5, 7, ...) per district, real seat counts
+  Plurality          most votes (the favourite) takes all of the district's mandates
 
 The 19 remaining mandates ("Utjevning") are levelling seats: each party gets its fair
 national share (Sainte-Lague on national votes) minus what it won in the districts.
   --sperregrense     (default) only parties with at least 4% of the national vote qualify
   --no-sperregrense  every party qualifies
 
+--split applies to Majority Judgment only. Storting always uses Sainte-Lague and
+plurality is always winner takes all.
 --split 1       winner takes all of the district's mandates (default)
 --split 2,1,1   half to the winner, a quarter each to second and third
 --split 3,2,1   most / ok / least to the top three, nothing to the rest
---split norway  Norway's own split: modified Sainte-Lague (1.4, 3, 5, ...) per district.
-                Plurality shares on votes (identical to the Storting count). Majority
-                Judgment shares on supporters = voters who graded the party Good or better,
-                since grades give no vote count. Then the only difference between the
-                systems is how voters express themselves, not how mandates are split.
+--split norway  Norway's own split: modified Sainte-Lague (1.4, 3, 5, ...) per district on
+                supporters = voters who graded the party Good or better, since grades give
+                no vote count. Then the only difference between Majority Judgment and the
+                Storting count is how voters express themselves, not how mandates are split.
 
 Real voters: --cses YEAR loads Norwegian respondents from the CSES Integrated Module
 Dataset (data/cses_imd_csv.zip, years 1997-2017). Their 0-10 like/dislike scores become
@@ -394,16 +395,12 @@ def mj_seats(district_ballots: dict[str, list[Ballot]], candidates: list[str],
     return _finish(by_district, candidates)
 
 
-def plurality_seats(district_votes: dict[str, dict[str, int]], candidates: list[str],
-                    weights: Split) -> SeatsResult:
-    """Most votes first per district; the district's mandates split by weights."""
+def plurality_seats(district_votes: dict[str, dict[str, int]], candidates: list[str]) -> SeatsResult:
+    """First past the post: the party with most votes takes all of the district's mandates."""
     by_district = {}
     for d, votes in district_votes.items():
-        if weights == NORWAY:
-            by_district[d] = sainte_lague(votes, seats_in(d))
-            continue
         ranking = sorted(candidates, key=lambda c: -votes[c])  # stable: ties keep input order
-        by_district[d] = split_seats(seats_in(d), ranking, weights)
+        by_district[d] = split_seats(seats_in(d), ranking, [1])
     return _finish(by_district, candidates)
 
 
@@ -436,8 +433,8 @@ class Election:
         return sum(len(b) for b in self.district_ballots.values())
 
     def picks(self) -> dict[str, list[str]]:
-        return {"Majority Judgment": self.mj.largest, "Plurality": self.plurality.largest,
-                "Storting": self.storting.largest}
+        return {"Majority Judgment": self.mj.largest, "Storting": self.storting.largest,
+                "Plurality": self.plurality.largest}
 
     def agree(self) -> str | None:
         """The party every system makes largest, or None."""
@@ -498,7 +495,7 @@ def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
     mj_national = mj_rank(all_ballots, candidates)
 
     mj = mj_seats(district_ballots, candidates, weights)
-    pl = plurality_seats(district_votes, candidates, weights)
+    pl = plurality_seats(district_votes, candidates)
     st = storting_seats(district_votes, candidates)
 
     def eligible_for(support: dict[str, int]) -> list[str]:
@@ -666,31 +663,31 @@ def print_report(e: Election, candidates: list[str], weights: Split) -> None:
     print(f"Largest party: {' = '.join(e.mj.largest)}")
     print()
 
-    print(f"Plurality  (split {split_label(weights)})")
-    for c in sorted(candidates, key=lambda c: -e.plurality.seats[c]):
-        print(f"{c:{width}} {e.votes[c]:>7} votes ({e.votes[c] / n:5.1%})   {e.plurality.seats[c]:>3} seats ({e.plurality.seats[c] / S:5.1%})")
-    print(f"Largest party: {' = '.join(e.plurality.largest)}  (ambiguous ballots: {e.ambiguous})")
-    print()
-
-    print("Storting (Norway, modified Sainte-Lague per district, same votes)")
+    print("Storting (Norway, modified Sainte-Lague per district)")
     for c in sorted(candidates, key=lambda c: -e.storting.seats[c]):
         print(f"{c:{width}} {e.votes[c]:>7} votes ({e.votes[c] / n:5.1%})   {e.storting.seats[c]:>3} seats ({e.storting.seats[c] / S:5.1%})")
     print(f"Largest party: {' = '.join(e.storting.largest)}")
     print()
 
+    print("Plurality  (winner takes all of the district's mandates, same votes)")
+    for c in sorted(candidates, key=lambda c: -e.plurality.seats[c]):
+        print(f"{c:{width}} {e.votes[c]:>7} votes ({e.votes[c] / n:5.1%})   {e.plurality.seats[c]:>3} seats ({e.plurality.seats[c] / S:5.1%})")
+    print(f"Largest party: {' = '.join(e.plurality.largest)}  (ambiguous ballots: {e.ambiguous})")
+    print()
+
     dw = max(len(d) for d in e.districts)
-    print(f"{'District':{dw}}  seats  voters  {'MJ winner':{width}}  {'Plurality':{width}}  {'Storting':{width}}")
+    print(f"{'District':{dw}}  seats  voters  {'MJ winner':{width}}  {'Storting':{width}}  {'Plurality':{width}}")
     for d in e.districts:
         def top(res):
             best = max(res.by_district[d].values())
             return " = ".join(c for c in candidates if res.by_district[d][c] == best)
         voters = str(len(e.district_ballots[d])) if d in e.district_ballots else "national"
         print(f"{d:{dw}}  {seats_in(d):>5}  {voters:>8}  "
-              f"{top(e.mj):{width}}  {top(e.plurality):{width}}  {top(e.storting):{width}}")
+              f"{top(e.mj):{width}}  {top(e.storting):{width}}  {top(e.plurality):{width}}")
     if True:
         print()
         print(f"{LEVELLING} (levelling, fair share minus district seats):")
-        for name, res in (("Majority Judgment", e.mj), ("Plurality", e.plurality), ("Storting", e.storting)):
+        for name, res in (("Majority Judgment", e.mj), ("Storting", e.storting), ("Plurality", e.plurality)):
             parts = ", ".join(f"{c} {n}" for c, n in res.by_district[LEVELLING].items() if n)
             print(f"  {name:<18} {parts or '-'}")
     print()
@@ -709,8 +706,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--sperregrense", action=argparse.BooleanOptionalAction, default=True,
                     help="on: only parties >= 4%% get Utjevning levelling mandates; off: every party does")
     ap.add_argument("--split", default="1",
-                    help="mandate split per district: 1 (winner takes all), 2,1,1, 3,2,1 or norway "
-                         "(modified Sainte-Lague, like the Storting count)")
+                    help="Majority Judgment mandate split per district: 1 (winner takes all), 2,1,1, 3,2,1 "
+                         "or norway (modified Sainte-Lague on supporters, like the Storting count)")
     ap.add_argument("--cses", type=int, metavar="YEAR", choices=CSES_YEARS,
                     help="use real Norwegian voters from CSES for this election year instead of random ones")
     ap.add_argument("--seed", type=int, default=42)
