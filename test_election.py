@@ -416,3 +416,92 @@ def test_norway_split_mj_levelling_uses_supporters():
     e = count_all(db, parties, random.Random(0), NORWAY, True)
     assert e.storting.seats == {"A": 169, "B": 0}  # votes: A has them all
     assert abs(e.mj.seats["A"] - e.mj.seats["B"]) <= 1  # supporters: equal, after levelling too
+
+
+# ---------------------------------------------------------------- fast key and system specs
+
+def test_mj_key_matches_pairwise_compare():
+    from functools import cmp_to_key
+    from election import mj_key
+    rng = random.Random(123)
+    grades = list(G)
+    for _ in range(300):
+        n_parties = rng.randint(2, 9)
+        n_voters = rng.randint(1, 60)
+        # bias toward ties so the deep rounds of the tie-break get exercised
+        pool = rng.sample(grades, rng.randint(1, 6))
+        lists = [[rng.choice(pool) for _ in range(n_voters)] for _ in range(n_parties)]
+        by_key = sorted(range(n_parties), key=lambda i: mj_key(lists[i]))
+        by_cmp = sorted(range(n_parties), key=cmp_to_key(lambda a, b: compare(lists[a], lists[b])))
+        # same order up to full ties: check pairwise agreement instead of index equality
+        for i in range(n_parties):
+            for j in range(n_parties):
+                c = compare(lists[i], lists[j])
+                ki, kj = mj_key(lists[i]), mj_key(lists[j])
+                assert (c < 0) == (ki < kj) and (c > 0) == (ki > kj) and (c == 0) == (ki == kj)
+        assert [mj_key(lists[i]) for i in by_key] == [mj_key(lists[i]) for i in by_cmp]
+
+
+def test_system_spec_validation():
+    from election import SystemSpec, PRESETS
+    SystemSpec("x", "grades", "2,1,1", "open").validate()
+    for bad in (dict(method="ranked"), dict(levelling="maybe"), dict(split="0,1"), dict(name="  ")):
+        with pytest.raises(ValueError):
+            SystemSpec(**{"name": "x", "method": "grades", "split": "1", "levelling": "threshold", **bad}).validate()
+    assert SystemSpec.from_dict({"name": "n", "method": "votes", "split": "norway", "levelling": "none"}).split == NORWAY
+    assert set(PRESETS) == {"Norwegian", "American"}
+
+
+def test_presets_and_levelling_none():
+    from election import PRESETS, make_voters, run_system, STORTING_SEATS
+    parties = ["A", "B", "C", "D"]
+    db = simulate_districts(parties, 4000, random.Random(3))
+    v = make_voters(parties, db, random.Random(0))
+    for spec in PRESETS.values():
+        res = run_system(spec, v)
+        assert sum(res.seats.values()) == STORTING_SEATS
+    american = run_system(PRESETS["American"], v)
+    assert LEVELLING not in american.by_district
+    assert american.eligible is None
+    for d, seats in american.by_district.items():
+        assert sum(seats.values()) == DISTRICTS[d][0]  # full official count, winner takes all
+        assert max(seats.values()) == DISTRICTS[d][0]
+    norwegian = run_system(PRESETS["Norwegian"], v)
+    assert sum(norwegian.by_district[LEVELLING].values()) == 19
+    assert sum(seats_in(d, False) for d in DISTRICTS) == 169 and seats_in(LEVELLING, False) == 0
+
+
+def test_run_board_shape():
+    from election import PRESETS, SystemSpec, make_voters, run_board
+    parties = ["A", "B", "C"]
+    v = make_voters(parties, simulate_districts(parties, 2000, random.Random(5)), random.Random(0))
+    out = run_board(v, [SystemSpec("Majority Judgment", "grades", "1", "threshold"),
+                        SystemSpec("custom", "votes", "2,1,1", "open")])
+    assert out["parties"] == parties and out["n_voters"] == 2000 and len(out["blocks"]) == 2
+    b = out["blocks"][0]
+    assert b["spec"]["name"] == "Majority Judgment"
+    assert {r["party"] for r in b["rows"]} == set(parties)
+    row = b["rows"][0]
+    assert set(row) >= {"counts", "median", "p", "q", "votes", "vote_share", "seats", "seat_share"}
+    assert sum(r["seats"] for r in b["rows"]) == 169
+    assert b["districts"][-1]["name"] == LEVELLING and b["districts"][-1]["voters"] is None
+    assert b["levelling"] is not None and sum(b["levelling"].values()) == 19
+    assert out["blocks"][1]["spec"]["split"] == "2,1,1"
+
+
+def test_ui_handle_run_and_errors():
+    import ui
+    req = {"voters": {"source": "random", "parties": ["X", "Y"], "n": 1000, "seed": 1},
+           "systems": [{"name": "a", "method": "grades", "split": "1", "levelling": "threshold"},
+                       {"name": "b", "method": "votes", "split": "norway", "levelling": "none"}]}
+    out = ui.handle_run(req)
+    assert len(out["blocks"]) == 2 and out["n_voters"] == 1000
+    assert out["blocks"][1]["levelling"] is None
+    # cached electorate: same settings give identical ballots-derived numbers
+    assert ui.handle_run(req)["blocks"][0]["rows"] == out["blocks"][0]["rows"]
+    with pytest.raises(ValueError):
+        ui.handle_run({"voters": {"source": "random", "parties": ["only"], "n": 100, "seed": 1}, "systems": []})
+    with pytest.raises(ValueError):
+        ui.handle_run({"voters": {"source": "random", "parties": ["A", "B"], "n": 100, "seed": 1},
+                       "systems": [{"name": "z", "method": "nope"}]})
+    assert ui.presets_payload()["cses_years"][-1] == 2017

@@ -139,25 +139,92 @@ def compare(grades_a: list[Grade], grades_b: list[Grade]) -> int:
     return 0
 
 
+GRADE_INDEX = {g: i for i, g in enumerate(GRADES_DESC)}  # 0 = Excellent ... 5 = Reject
+
+
+def _bucket_majority(counts: list[int]) -> int:
+    """Index (in GRADES_DESC) of the majority grade, from per-grade counts, best first.
+
+    Same rule as majority_grade: middle grade; even count with different middles ->
+    drop the worst grade and try again. Works on a copy of the counts.
+    """
+    counts = list(counts)
+    n = sum(counts)
+    if n == 0:
+        raise ValueError("no grades")
+
+    def at(pos: int) -> int:
+        acc = 0
+        for i, c in enumerate(counts):
+            acc += c
+            if pos < acc:
+                return i
+        raise IndexError(pos)
+
+    while True:
+        if n % 2 == 1:
+            return at(n // 2)
+        lo, hi = at(n // 2 - 1), at(n // 2)
+        if lo == hi:
+            return hi
+        for i in range(len(counts) - 1, -1, -1):  # drop the worst grade
+            if counts[i]:
+                counts[i] -= 1
+                break
+        n -= 1
+
+
+def grade_counts(grades: list[Grade]) -> list[int]:
+    """Per-grade counts, best first (same order as GRADES_DESC)."""
+    counts = [0] * len(GRADES_DESC)
+    for g in grades:
+        counts[GRADE_INDEX[g]] += 1
+    return counts
+
+
+def mj_key(grades: list[Grade], counts: list[int] | None = None) -> list[tuple[int, int]]:
+    """Sort key giving the same order as compare(): one (median rank, -above) per round.
+
+    Each round: majority grade, then how many grades are above it, then the worst grade
+    is removed. Both sides of compare() do exactly this in lockstep, so comparing the
+    sequences lexicographically is the same tie-break, computed once per party in O(n).
+    Lower is better (rank 0 = Excellent, more above = more negative).
+    """
+    counts = list(counts) if counts is not None else grade_counts(grades)
+    n = sum(counts)
+    key = []
+    while n > 0:
+        m = _bucket_majority(counts)
+        key.append((m, -sum(counts[:m])))
+        for i in range(len(counts) - 1, -1, -1):
+            if counts[i]:
+                counts[i] -= 1
+                break
+        n -= 1
+    return key
+
+
 def mj_rank(ballots: list[Ballot], candidates: list[str]) -> list[MJResult]:
     """Candidates ranked best first by Majority Judgment."""
     results = []
+    keys = {}
     for name in candidates:
         grades = grades_for(ballots, name)
-        maj = majority_grade(grades)
         n = len(grades)
-        counts = Counter(grades)
+        counts = grade_counts(grades)
+        m = _bucket_majority(counts)
         results.append(
             MJResult(
                 name=name,
-                counts={g: counts.get(g, 0) for g in GRADES_DESC},
-                majority=maj,
-                p=sum(1 for g in grades if g.beats(maj)) / n,
-                q=sum(1 for g in grades if g.loses_to(maj)) / n,
+                counts={g: counts[i] for i, g in enumerate(GRADES_DESC)},
+                majority=GRADES_DESC[m],
+                p=sum(counts[:m]) / n,
+                q=sum(counts[m + 1:]) / n,
                 _grades=grades,
             )
         )
-    results.sort(key=cmp_to_key(lambda x, y: compare(x._grades, y._grades)))
+        keys[name] = mj_key(grades, counts)
+    results.sort(key=lambda r: keys[r.name])
     return results
 
 
@@ -298,9 +365,15 @@ DISTRICT_SEATS = STORTING_SEATS - LEVELLING_SEATS  # 150
 THRESHOLD = 0.04  # sperregrense: share of national votes needed for the levelling pool
 
 
-def seats_in(district: str) -> int:
-    """Mandates counted inside a district: the official number minus one, or 19 for Utjevning."""
-    return LEVELLING_SEATS if district == LEVELLING else DISTRICTS[district][0] - 1
+def seats_in(district: str, levelling: bool = True) -> int:
+    """Mandates counted inside a district.
+
+    With levelling seats: the official number minus one (19 for Utjevning itself).
+    Without: the full official number, and Utjevning has none.
+    """
+    if district == LEVELLING:
+        return LEVELLING_SEATS if levelling else 0
+    return DISTRICTS[district][0] - 1 if levelling else DISTRICTS[district][0]
 
 
 def split_voters(n_voters: int) -> dict[str, int]:
@@ -319,7 +392,7 @@ def simulate_districts(candidates: list[str], n_voters: int, rng: random.Random)
 
 
 NORWAY = "norway"  # split option: modified Sainte-Lague per district, like the Storting count
-MJ_SUPPORT_GRADE = Grade.GOOD  # under --split norway, an MJ "supporter" graded the party this or better
+MJ_SUPPORT_GRADE = Grade.GOOD  # under the norway split, an MJ "supporter" graded the party this or better
 Split = "list[int] | str"
 
 
@@ -329,6 +402,8 @@ def split_label(weights) -> str:
 
 def parse_split(text: str):
     """'1' -> [1], '2,1,1' -> [2, 1, 1], 'norway' -> NORWAY. Positive integers only."""
+    if isinstance(text, list):
+        return text
     if text.strip().lower() == NORWAY:
         return NORWAY
     try:
@@ -367,79 +442,21 @@ class SeatsResult:
     seats: dict[str, int]  # national total per party
     by_district: dict[str, dict[str, int]]
     largest: list[str]  # party or parties with the most seats nationally
+    eligible: list[str] | None = None  # parties allowed levelling seats (None = no levelling)
 
 
-def _finish(by_district: dict[str, dict[str, int]], candidates: list[str]) -> SeatsResult:
+def _finish(by_district: dict[str, dict[str, int]], candidates: list[str],
+            eligible: list[str] | None = None) -> SeatsResult:
     seats = {c: sum(d[c] for d in by_district.values()) for c in candidates}
     top = max(seats.values())
     return SeatsResult(seats=seats, by_district=by_district,
-                       largest=[c for c in candidates if seats[c] == top])
+                       largest=[c for c in candidates if seats[c] == top], eligible=eligible)
 
 
 def mj_support(ballots: list[Ballot], candidates: list[str]) -> dict[str, int]:
-    """Supporters per party: voters who graded it MJ_SUPPORT_GRADE or better (used by --split norway)."""
-    return {c: sum(1 for g in grades_for(ballots, c) if g == MJ_SUPPORT_GRADE or g.beats(MJ_SUPPORT_GRADE))
-            for c in candidates}
-
-
-def mj_seats(district_ballots: dict[str, list[Ballot]], candidates: list[str],
-             weights: Split) -> SeatsResult:
-    """Majority Judgment per district; the district's mandates split by weights."""
-    by_district = {}
-    for d, ballots in district_ballots.items():
-        if weights == NORWAY:
-            by_district[d] = sainte_lague(mj_support(ballots, candidates), seats_in(d))
-            continue
-        ranking = [r.name for r in mj_rank(ballots, candidates)]
-        by_district[d] = split_seats(seats_in(d), ranking, weights)
-    return _finish(by_district, candidates)
-
-
-def plurality_seats(district_votes: dict[str, dict[str, int]], candidates: list[str]) -> SeatsResult:
-    """First past the post: the party with most votes takes all of the district's mandates."""
-    by_district = {}
-    for d, votes in district_votes.items():
-        ranking = sorted(candidates, key=lambda c: -votes[c])  # stable: ties keep input order
-        by_district[d] = split_seats(seats_in(d), ranking, [1])
-    return _finish(by_district, candidates)
-
-
-def storting_seats(district_votes: dict[str, dict[str, int]], candidates: list[str]) -> SeatsResult:
-    """Norway's real district count: modified Sainte-Lague with each district's seat number."""
-    by_district = {d: sainte_lague(votes, seats_in(d)) for d, votes in district_votes.items()}
-    return _finish(by_district, candidates)
-
-
-@dataclass
-class Election:
-    district_ballots: dict[str, list[Ballot]]
-    district_votes: dict[str, dict[str, int]]
-    ambiguous: int
-    mj_national: list[MJResult]  # grade table over all ballots, ranked
-    votes: dict[str, int]  # national vote totals
-    mj: SeatsResult
-    plurality: SeatsResult
-    storting: SeatsResult
-    sperregrense: bool
-    eligible: list[str]  # parties allowed levelling seats (every party when sperregrense is off)
-
-    @property
-    def districts(self) -> list[str]:
-        """Every place mandates are counted, Utjevning last."""
-        return list(DISTRICTS) + [LEVELLING]
-
-    @property
-    def n_voters(self) -> int:
-        return sum(len(b) for b in self.district_ballots.values())
-
-    def picks(self) -> dict[str, list[str]]:
-        return {"Majority Judgment": self.mj.largest, "Storting": self.storting.largest,
-                "Plurality": self.plurality.largest}
-
-    def agree(self) -> str | None:
-        """The party every system makes largest, or None."""
-        first = self.mj.largest
-        return first[0] if len(first) == 1 and all(v == first for v in self.picks().values()) else None
+    """Supporters per party: voters who graded it MJ_SUPPORT_GRADE or better (used by the norway split)."""
+    bar = GRADE_INDEX[MJ_SUPPORT_GRADE]
+    return {c: sum(grade_counts(grades_for(ballots, c))[: bar + 1]) for c in candidates}
 
 
 def levelling_seats(votes: dict[str, int], district_seats: dict[str, int], eligible: list[str],
@@ -472,16 +489,86 @@ def levelling_seats(votes: dict[str, int], district_seats: dict[str, int], eligi
     return out
 
 
-def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
-              rng: random.Random, weights: Split, sperregrense: bool = True,
-              district_votes: dict[str, dict[str, int]] | None = None) -> Election:
-    """Count all three systems: district seats, then the 19 Utjevning levelling seats.
+# ---------------------------------------------------------------- systems
 
-    sperregrense: True = only parties with at least 4% of the national vote get levelling
-    seats; False = every party does.
-    district_votes: real votes per district (CSES). If None, each ballot votes for its
-    top-graded party.
-    """
+METHODS = ("grades", "votes")  # grades = Majority Judgment ranking; votes = one vote per voter
+LEVELLING_MODES = ("threshold", "open", "none")  # 4% sperregrense / every party / no levelling seats
+
+
+@dataclass(frozen=True)
+class SystemSpec:
+    """One electoral system: how voters are counted, how a district's mandates are split,
+    and what happens with the 19 Utjevning levelling mandates."""
+    name: str
+    method: str = "grades"
+    split: str = "1"
+    levelling: str = "threshold"
+
+    def validate(self) -> "SystemSpec":
+        if self.method not in METHODS:
+            raise ValueError(f"method must be one of {METHODS}, got '{self.method}'")
+        if self.levelling not in LEVELLING_MODES:
+            raise ValueError(f"levelling must be one of {LEVELLING_MODES}, got '{self.levelling}'")
+        parse_split(self.split)
+        if not self.name.strip():
+            raise ValueError("system needs a name")
+        return self
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "method": self.method, "split": self.split, "levelling": self.levelling}
+
+    @staticmethod
+    def from_dict(d: dict) -> "SystemSpec":
+        return SystemSpec(str(d.get("name", "")), str(d.get("method", "grades")),
+                          str(d.get("split", "1")), str(d.get("levelling", "threshold"))).validate()
+
+
+PRESETS = {  # systems in use somewhere in the world; Majority Judgment is built via "New system"
+    "Norwegian": SystemSpec("Norwegian", "votes", NORWAY, "threshold"),
+    "American": SystemSpec("American", "votes", "1", "none"),
+}
+
+
+@dataclass
+class Voters:
+    """The shared electorate every system is counted on."""
+    candidates: list[str]
+    district_ballots: dict[str, list[Ballot]]
+    district_votes: dict[str, dict[str, int]]
+    ambiguous: int
+    source: str
+
+    @property
+    def all_ballots(self) -> list[Ballot]:
+        return [b for ballots in self.district_ballots.values() for b in ballots]
+
+    @property
+    def n_voters(self) -> int:
+        return sum(len(b) for b in self.district_ballots.values())
+
+    @property
+    def votes(self) -> dict[str, int]:
+        return {c: sum(v[c] for v in self.district_votes.values()) for c in self.candidates}
+
+    def mj_ranking(self, district: str) -> list[str]:
+        """Majority Judgment order in one district, computed once per electorate."""
+        cache = self.__dict__.setdefault("_rank_cache", {})
+        if district not in cache:
+            cache[district] = [r.name for r in mj_rank(self.district_ballots[district], self.candidates)]
+        return cache[district]
+
+    def mj_supporters(self, district: str | None = None) -> dict[str, int]:
+        """Supporters per party (Good or better), per district or national, computed once."""
+        cache = self.__dict__.setdefault("_support_cache", {})
+        if district not in cache:
+            ballots = self.all_ballots if district is None else self.district_ballots[district]
+            cache[district] = mj_support(ballots, self.candidates)
+        return cache[district]
+
+
+def make_voters(candidates: list[str], district_ballots: dict[str, list[Ballot]], rng: random.Random,
+                district_votes: dict[str, dict[str, int]] | None = None, source: str = "random") -> Voters:
+    """Collect one vote per ballot (the top-graded party) unless real votes are given."""
     if LEVELLING in district_ballots:
         raise ValueError(f"{LEVELLING} is not a district; it is filled from national votes")
     ambiguous = 0
@@ -490,40 +577,96 @@ def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
         for d, ballots in district_ballots.items():
             district_votes[d], amb = collect_votes(ballots, candidates, rng)
             ambiguous += amb
-    all_ballots = [b for ballots in district_ballots.values() for b in ballots]
-    votes = {c: sum(v[c] for v in district_votes.values()) for c in candidates}
-    mj_national = mj_rank(all_ballots, candidates)
+    return Voters(candidates, district_ballots, district_votes, ambiguous, source)
 
-    mj = mj_seats(district_ballots, candidates, weights)
-    pl = plurality_seats(district_votes, candidates)
-    st = storting_seats(district_votes, candidates)
 
-    def eligible_for(support: dict[str, int]) -> list[str]:
-        if not sperregrense:
-            return list(candidates)
-        total = sum(support.values()) or 1
-        return [c for c in candidates if support[c] / total >= THRESHOLD] or list(candidates)
+def run_system(spec: SystemSpec, v: Voters) -> SeatsResult:
+    """Count one system on the shared voters: district seats, then levelling if the spec has it."""
+    spec.validate()
+    weights = parse_split(spec.split)
+    lev = spec.levelling != "none"
+    by_district: dict[str, dict[str, int]] = {}
+    for d in DISTRICTS:
+        seats = seats_in(d, lev)
+        if spec.method == "grades":
+            if weights == NORWAY:
+                by_district[d] = sainte_lague(v.mj_supporters(d), seats)
+            else:
+                by_district[d] = split_seats(seats, v.mj_ranking(d), weights)
+        else:
+            votes = v.district_votes[d]
+            if weights == NORWAY:
+                by_district[d] = sainte_lague(votes, seats)
+            else:
+                ranking = sorted(v.candidates, key=lambda c: -votes[c])  # stable: ties keep input order
+                by_district[d] = split_seats(seats, ranking, weights)
+    res = _finish(by_district, v.candidates)
+    if not lev:
+        return res
+    # Levelling measure: supporters when MJ uses the norway split, national votes otherwise.
+    measure = v.mj_supporters() if (spec.method == "grades" and weights == NORWAY) else v.votes
+    eligible = list(v.candidates)
+    if spec.levelling == "threshold":
+        total = sum(measure.values()) or 1
+        eligible = [c for c in v.candidates if measure[c] / total >= THRESHOLD] or list(v.candidates)
+    res.by_district[LEVELLING] = levelling_seats(measure, res.seats, eligible)
+    return _finish(res.by_district, v.candidates, eligible)
 
-    eligible = eligible_for(votes)
-    for res in (pl, st):
-        res.by_district[LEVELLING] = levelling_seats(votes, res.seats, eligible)
-    # Under the Norwegian split MJ measures everything in supporters (Good or better),
-    # so its fair share and threshold use supporters too. Otherwise votes, like the rest.
-    mj_measure = mj_support(all_ballots, candidates) if weights == NORWAY else votes
-    mj.by_district[LEVELLING] = levelling_seats(mj_measure, mj.seats, eligible_for(mj_measure))
-    mj, pl, st = (_finish(r.by_district, candidates) for r in (mj, pl, st))
 
+@dataclass
+class Election:
+    """The three default systems on one electorate (used by the command line and tests)."""
+    district_ballots: dict[str, list[Ballot]]
+    district_votes: dict[str, dict[str, int]]
+    ambiguous: int
+    mj_national: list[MJResult]  # grade table over all ballots, ranked
+    votes: dict[str, int]  # national vote totals
+    mj: SeatsResult
+    plurality: SeatsResult
+    storting: SeatsResult
+    sperregrense: bool
+    eligible: list[str]  # parties allowed levelling seats (every party when sperregrense is off)
+
+    @property
+    def districts(self) -> list[str]:
+        """Every place mandates are counted, Utjevning last."""
+        return list(DISTRICTS) + [LEVELLING]
+
+    @property
+    def n_voters(self) -> int:
+        return sum(len(b) for b in self.district_ballots.values())
+
+    def picks(self) -> dict[str, list[str]]:
+        return {"Majority Judgment": self.mj.largest, "Storting": self.storting.largest,
+                "Plurality": self.plurality.largest}
+
+    def agree(self) -> str | None:
+        """The party every system makes largest, or None."""
+        first = self.mj.largest
+        return first[0] if len(first) == 1 and all(v == first for v in self.picks().values()) else None
+
+
+def count_all(district_ballots: dict[str, list[Ballot]], candidates: list[str],
+              rng: random.Random, weights: Split, sperregrense: bool = True,
+              district_votes: dict[str, dict[str, int]] | None = None) -> Election:
+    """The three default systems: MJ with the given split, Storting (votes + norway split),
+    plurality (votes, winner takes all). All with levelling seats; sperregrense sets the 4% rule."""
+    v = make_voters(candidates, district_ballots, rng, district_votes)
+    lev = "threshold" if sperregrense else "open"
+    mj = run_system(SystemSpec("Majority Judgment", "grades", split_label(weights), lev), v)
+    st = run_system(SystemSpec("Storting", "votes", NORWAY, lev), v)
+    pl = run_system(SystemSpec("Plurality", "votes", "1", lev), v)
     return Election(
         district_ballots=district_ballots,
-        district_votes=district_votes,
-        ambiguous=ambiguous,
-        mj_national=mj_national,
-        votes=votes,
+        district_votes=v.district_votes,
+        ambiguous=v.ambiguous,
+        mj_national=mj_rank(v.all_ballots, candidates),
+        votes=v.votes,
         mj=mj,
         plurality=pl,
         storting=st,
         sperregrense=sperregrense,
-        eligible=eligible,
+        eligible=st.eligible or list(candidates),
     )
 
 
@@ -614,9 +757,9 @@ def load_cses(year: int, rng: random.Random, zip_path: str = CSES_ZIP,
     return parties, ballots, votes
 
 
-def cses_election(year: int, rng: random.Random, weights: Split, sperregrense: bool = True,
-                  zip_path: str = CSES_ZIP, cache_path: str = CSES_CACHE) -> tuple[list[str], Election]:
-    """Spread the real respondents over the districts by population and count all systems."""
+def cses_districts(year: int, rng: random.Random, zip_path: str = CSES_ZIP,
+                   cache_path: str = CSES_CACHE) -> Voters:
+    """Spread the real respondents over the districts at random by population."""
     parties, ballots, votes = load_cses(year, rng, zip_path, cache_path)
     shares = split_voters(len(ballots))
     if len(ballots) < len(shares):
@@ -639,7 +782,84 @@ def cses_election(year: int, rng: random.Random, weights: Split, sperregrense: b
         for i in idx:
             counts[votes[i]] += 1
         district_votes[d] = counts
-    return parties, count_all(district_ballots, parties, rng, weights, sperregrense, district_votes)
+    return make_voters(parties, district_ballots, rng, district_votes, source=f"CSES Norway {year}")
+
+
+def cses_election(year: int, rng: random.Random, weights: Split, sperregrense: bool = True,
+                  zip_path: str = CSES_ZIP, cache_path: str = CSES_CACHE) -> tuple[list[str], Election]:
+    """Real respondents through the three default systems (command line)."""
+    v = cses_districts(year, rng, zip_path, cache_path)
+    return v.candidates, count_all(v.district_ballots, v.candidates, rng, weights, sperregrense, v.district_votes)
+
+
+# ---------------------------------------------------------------- board (many systems at once)
+
+def build_voters(settings: dict, zip_path: str = CSES_ZIP, cache_path: str = CSES_CACHE) -> Voters:
+    """settings: {"source": "random" | "cses_2017", "parties": [...], "n": 10000, "seed": 42}."""
+    seed = int(settings.get("seed", 42))
+    rng = random.Random(seed)
+    source = str(settings.get("source", "random"))
+    if source.startswith("cses_"):
+        return cses_districts(int(source[5:]), rng, zip_path, cache_path)
+    parties = [str(p).strip() for p in settings.get("parties", []) if str(p).strip()]
+    if len(parties) < 2:
+        raise ValueError("enter at least two parties")
+    if len(set(parties)) != len(parties):
+        raise ValueError("party names must be unique")
+    n = int(settings.get("n", 10000))
+    if n < len(DISTRICTS):
+        raise ValueError(f"need at least {len(DISTRICTS)} voters")
+    return make_voters(parties, simulate_districts(parties, n, rng), rng, source="random")
+
+
+def run_board(v: Voters, specs: list[SystemSpec]) -> dict:
+    """Every system on the same voters, as plain JSON-ready data for the board page."""
+    mj_national = mj_rank(v.all_ballots, v.candidates)
+    mj_order = {r.name: i for i, r in enumerate(mj_national)}
+    grade_rows = {r.name: r for r in mj_national}
+    votes = v.votes
+    n = v.n_voters
+    blocks = []
+    for spec in specs:
+        res = run_system(spec, v)
+        lev = spec.levelling != "none"
+        rows = []
+        for c in sorted(v.candidates, key=lambda c: (-res.seats[c], mj_order[c])):
+            r = grade_rows[c]
+            rows.append({
+                "party": c,
+                "counts": {g.label: r.counts[g] for g in GRADES_DESC},
+                "median": r.majority.label,
+                "p": round(r.p, 3),
+                "q": round(r.q, 3),
+                "votes": votes[c],
+                "vote_share": round(votes[c] / n, 4),
+                "seats": res.seats[c],
+                "seat_share": round(res.seats[c] / STORTING_SEATS, 4),
+            })
+        districts = []
+        for d in list(DISTRICTS) + ([LEVELLING] if lev else []):
+            districts.append({
+                "name": d,
+                "seats": seats_in(d, lev),
+                "voters": len(v.district_ballots[d]) if d in v.district_ballots else None,
+                "by_party": {c: k for c, k in res.by_district[d].items() if k},
+            })
+        blocks.append({
+            "spec": spec.to_dict(),
+            "largest": res.largest,
+            "eligible": res.eligible,
+            "rows": rows,
+            "levelling": {c: k for c, k in res.by_district[LEVELLING].items() if k} if lev else None,
+            "districts": districts,
+        })
+    return {
+        "source": v.source,
+        "parties": list(v.candidates),
+        "n_voters": n,
+        "ambiguous": v.ambiguous,
+        "blocks": blocks,
+    }
 
 
 # ---------------------------------------------------------------- cli
@@ -675,21 +895,20 @@ def print_report(e: Election, candidates: list[str], weights: Split) -> None:
     print(f"Largest party: {' = '.join(e.plurality.largest)}  (ambiguous ballots: {e.ambiguous})")
     print()
 
+    def seats_txt(res: SeatsResult, d: str) -> str:
+        """Every party's mandates in the district, e.g. 'Ap 5, Høyre 3'."""
+        return ", ".join(f"{c} {n}" for c, n in res.by_district[d].items() if n) or "-"
+
     dw = max(len(d) for d in e.districts)
-    print(f"{'District':{dw}}  seats  voters  {'MJ winner':{width}}  {'Storting':{width}}  {'Plurality':{width}}")
+    cols = {name: max(len(name), max(len(seats_txt(res, d)) for d in e.districts))
+            for name, res in (("Majority Judgment", e.mj), ("Storting", e.storting), ("Plurality", e.plurality))}
+    print(f"Mandates per district ({LEVELLING} = levelling seats, fair share minus district seats)")
+    print(f"{'District':{dw}}  seats  voters  " + "  ".join(f"{name:{w}}" for name, w in cols.items()))
     for d in e.districts:
-        def top(res):
-            best = max(res.by_district[d].values())
-            return " = ".join(c for c in candidates if res.by_district[d][c] == best)
         voters = str(len(e.district_ballots[d])) if d in e.district_ballots else "national"
         print(f"{d:{dw}}  {seats_in(d):>5}  {voters:>8}  "
-              f"{top(e.mj):{width}}  {top(e.storting):{width}}  {top(e.plurality):{width}}")
-    if True:
-        print()
-        print(f"{LEVELLING} (levelling, fair share minus district seats):")
-        for name, res in (("Majority Judgment", e.mj), ("Storting", e.storting), ("Plurality", e.plurality)):
-            parts = ", ".join(f"{c} {n}" for c, n in res.by_district[LEVELLING].items() if n)
-            print(f"  {name:<18} {parts or '-'}")
+              f"{seats_txt(e.mj, d):{cols['Majority Judgment']}}  {seats_txt(e.storting, d):{cols['Storting']}}  "
+              f"{seats_txt(e.plurality, d):{cols['Plurality']}}")
     print()
 
     winner = e.agree()

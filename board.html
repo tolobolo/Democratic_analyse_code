@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voting systems board</title>
+<style>
+  :root {
+    --bg: #fafafa; --panel: #ffffff; --ink: #1f2328; --muted: #6b7280; --line: #e5e7eb;
+    --accent: #2563eb; --accent-ink: #ffffff; --soft: #f3f4f6; --shadow: 0 1px 3px rgba(0,0,0,.08);
+    --g-exc: #1b7f3b; --g-vg: #5cb85c; --g-good: #a8d08d; --g-acc: #f0d66b; --g-poor: #f0a04b; --g-rej: #d9534f;
+  }
+  [data-theme="dark"] {
+    --bg: #121417; --panel: #1b1e23; --ink: #e6e8eb; --muted: #9aa3ad; --line: #2b3138;
+    --accent: #7aa2ff; --accent-ink: #0b0f14; --soft: #23282e; --shadow: 0 1px 3px rgba(0,0,0,.5);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); display: flex; }
+  aside { width: 260px; flex: 0 0 260px; height: 100vh; overflow: auto; padding: 14px 16px; border-right: 1px solid var(--line); background: var(--panel); }
+  aside h1 { font-size: 15px; margin: 0 0 12px; letter-spacing: .2px; }
+  aside label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 12px 0 4px; }
+  aside input, aside select, aside textarea { width: 100%; font: inherit; color: var(--ink); background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; }
+  aside textarea { height: 84px; resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .status { margin-top: 14px; font-size: 11px; color: var(--muted); min-height: 2.6em; }
+  .status button { font-size: 11px; padding: 2px 6px; margin-top: 4px; }
+  .toggle { margin-top: 14px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  main { flex: 1; position: relative; overflow: auto; }
+  .toolbar { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center; padding: 10px 14px; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+  .toolbar .sep { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  button { font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:hover { filter: brightness(0.96); }
+  #progress { position: fixed; top: 0; left: 260px; right: 0; height: 2px; background: var(--accent); transform: scaleX(0); transform-origin: left; transition: transform .25s; z-index: 10; }
+  #progress.on { transform: scaleX(1); opacity: .9; }
+  #board { position: relative; min-height: 1600px; min-width: 1200px; }
+  .block { position: absolute; width: 600px; min-width: 340px; min-height: 90px; max-width: 95vw; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); resize: both; overflow: auto; display: flex; flex-direction: column; }
+  .block .body { flex: 1; overflow: auto; display: flex; flex-direction: column; --row: 22px; }
+  .block table.main { font-size: clamp(11px, calc(var(--row) * 0.5), 22px); width: 100%; }
+  .block table.main tr:last-child td { border-bottom: 1px solid var(--line); }
+  .block table.main th { height: 20px; line-height: 16px; padding-top: 1px; padding-bottom: 1px; font-size: 11px; }
+  .block table.main td { height: var(--row); }
+  .block table.main th.grades, .block table.main td.grades { width: 26%; }
+  .block table.main th.seatbar, .block table.main td.seatbar { width: 14%; }
+  .block header { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  .block::-webkit-resizer { background: linear-gradient(135deg, transparent 50%, var(--line) 50%); border-bottom-right-radius: 8px; }
+  .block header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .handle { cursor: grab; color: var(--muted); user-select: none; padding: 0 4px; font-size: 14px; letter-spacing: -2px; }
+  .block { cursor: grab; }
+  .block.dragging { opacity: .92; cursor: grabbing; z-index: 20; user-select: none; }
+  .block button, .block summary { cursor: pointer; }
+  .block h2 { font-size: 13px; margin: 0; flex: 1; }
+  .block h2 small { display: block; font-weight: normal; color: var(--muted); font-size: 11px; }
+  .close { border: 0; background: none; color: var(--muted); font-size: 15px; padding: 0 4px; }
+  .close:hover { color: var(--g-rej); }
+  .verdict { padding: 6px 10px 0; font-weight: 600; }
+  .block table { width: 100%; border-collapse: collapse; margin: 6px 0 2px; font-size: 12px; }
+  .block th, .block td { padding: 2px 6px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+  .block th { color: var(--muted); font-weight: 500; font-size: 11px; }
+  .block th:first-child, .block td:first-child { text-align: left; }
+  .block tr:last-child td { border-bottom: 0; }
+  .gbar { display: flex; width: 100%; min-width: 80px; height: clamp(8px, calc(var(--row) * 0.55), 48px); border-radius: 2px; overflow: hidden; margin-left: auto; }
+  .gbar i { display: block; height: 100%; }
+  .sbar { display: block; width: 100%; min-width: 60px; height: clamp(6px, calc(var(--row) * 0.45), 40px); background: var(--soft); border-radius: 2px; overflow: hidden; }
+  .sbar i { display: block; height: 100%; background: var(--accent); }
+  .lev { padding: 4px 10px 6px; color: var(--muted); font-size: 11px; }
+  .lev b { color: var(--ink); font-weight: 600; }
+  details { padding: 0 10px 8px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+  details table { font-size: 11px; }
+  details td:nth-child(4) { text-align: left; white-space: normal; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 16px 18px; width: 420px; box-shadow: 0 10px 30px rgba(0,0,0,.2); }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog h3 { margin: 0 0 10px; font-size: 14px; }
+  dialog fieldset { border: 0; padding: 0; margin: 0 0 10px; }
+  dialog legend { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 4px; }
+  dialog label.opt { display: block; padding: 2px 0; }
+  dialog label.opt small { color: var(--muted); margin-left: 4px; }
+  dialog input[type=text] { font: inherit; color: var(--ink); background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+  .banner { position: fixed; bottom: 12px; right: 12px; background: var(--g-rej); color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 12px; display: none; z-index: 30; max-width: 60%; }
+  .banner.on { display: block; }
+  .empty { position: absolute; top: 90px; left: 24px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<aside>
+  <h1>Voters</h1>
+  <label for="source">Data</label>
+  <select id="source"></select>
+  <div id="parties-wrap">
+    <label for="parties">Parties, one per line</label>
+    <textarea id="parties"></textarea>
+  </div>
+  <label for="n">Number of voters</label>
+  <input id="n" type="number" min="19" step="100">
+  <label for="seed">Random seed</label>
+  <input id="seed" type="number">
+  <div class="status" id="status"></div>
+  <label class="toggle"><input type="checkbox" id="dark"> dark mode</label>
+  <div class="status">Every change re-runs all blocks on the same voters. Drag a block from anywhere on it, resize it by the bottom-right corner. Layout is saved in this browser.<br><button id="reset-layout" type="button">Reset layout</button></div>
+</aside>
+
+<main>
+  <div class="toolbar">
+    <button class="primary" id="new">+ New system</button>
+    <span class="sep">presets</span>
+    <span id="presets"></span>
+  </div>
+  <div id="board"><div class="empty" id="empty" hidden>No systems yet. Add one with "New system" or a preset.</div></div>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="dlg-form">
+    <h3>New system</h3>
+    <fieldset>
+      <legend>Voting method</legend>
+      <label class="opt"><input type="radio" name="method" value="grades" checked> Majority Judgment <small>voters grade every party, ranked by median</small></label>
+      <label class="opt"><input type="radio" name="method" value="votes"> Single vote <small>one vote for the favourite, ranked by votes</small></label>
+    </fieldset>
+    <fieldset>
+      <legend>Mandate split per district</legend>
+      <label class="opt"><input type="radio" name="split" value="1" checked> Winner takes all</label>
+      <label class="opt"><input type="radio" name="split" value="2,1,1"> 2,1,1 <small>half to the winner, a quarter each to 2nd and 3rd</small></label>
+      <label class="opt"><input type="radio" name="split" value="3,2,1"> 3,2,1 <small>most / ok / least to the top three</small></label>
+      <label class="opt"><input type="radio" name="split" value="norway"> Norwegian <small>modified Sainte-Laguë 1.4, 3, 5 …</small></label>
+      <label class="opt"><input type="radio" name="split" value="custom"> Custom <input type="text" id="custom" placeholder="4,2,1,1" size="10"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Utjevning levelling seats</legend>
+      <label class="opt"><input type="radio" name="levelling" value="threshold" checked> Sperregrense 4 % <small>only parties with 4 % of the vote</small></label>
+      <label class="opt"><input type="radio" name="levelling" value="open"> Open to all</label>
+      <label class="opt"><input type="radio" name="levelling" value="none"> None <small>all 169 mandates stay in the districts</small></label>
+    </fieldset>
+    <fieldset>
+      <legend>Name</legend>
+      <input type="text" id="name" style="width:100%">
+    </fieldset>
+    <div class="actions">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" class="primary">Add block</button>
+    </div>
+  </form>
+</dialog>
+<div class="banner" id="banner"></div>
+
+<script>
+(function () {
+  const KEY = "board.v1";
+  const GRADES = ["Excellent", "Very Good", "Good", "Acceptable", "Poor", "Reject"];
+  const GCOL = { "Excellent": "var(--g-exc)", "Very Good": "var(--g-vg)", "Good": "var(--g-good)",
+                 "Acceptable": "var(--g-acc)", "Poor": "var(--g-poor)", "Reject": "var(--g-rej)" };
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  let state = load() || {
+    voters: { source: "random", parties: ["Far-left", "Center", "Far-right"], n: 10000, seed: 42 },
+    blocks: [], dark: null, seeded: false,
+  };
+  let presets = [], results = null, timer = null, inflight = null, pending = false;
+
+  function load() { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } }
+  function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+
+  // ---------- theme
+  function applyTheme() {
+    const dark = state.dark === null ? window.matchMedia("(prefers-color-scheme: dark)").matches : state.dark;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    $("dark").checked = dark;
+  }
+  $("dark").addEventListener("change", () => { state.dark = $("dark").checked; save(); applyTheme(); });
+
+  // ---------- sidebar
+  function fillSidebar() {
+    const src = $("source");
+    src.innerHTML = '<option value="random">Random voters</option>' +
+      (presets.cses_years || []).map((y) => `<option value="cses_${y}">CSES Norway ${y}</option>`).join("");
+    src.value = state.voters.source;
+    $("parties").value = state.voters.parties.join("\n");
+    $("n").value = state.voters.n;
+    $("seed").value = state.voters.seed;
+    $("parties-wrap").hidden = state.voters.source !== "random";
+  }
+  function readSidebar() {
+    state.voters = {
+      source: $("source").value,
+      parties: $("parties").value.split("\n").map((s) => s.trim()).filter(Boolean),
+      n: parseInt($("n").value, 10) || 10000,
+      seed: parseInt($("seed").value, 10) || 0,
+    };
+    $("parties-wrap").hidden = state.voters.source !== "random";
+    save();
+    schedule();
+  }
+  ["source", "parties", "n", "seed"].forEach((id) => $(id).addEventListener("input", readSidebar));
+
+  // ---------- blocks
+  function describe(spec) {
+    const m = spec.method === "grades" ? "Majority Judgment" : "Single vote";
+    const s = spec.split === "norway" ? "Sainte-Laguë split" : spec.split === "1" ? "winner takes all" : `split ${spec.split}`;
+    const l = spec.levelling === "threshold" ? "sperregrense 4 %" : spec.levelling === "open" ? "levelling open to all" : "no levelling";
+    return `${m} · ${s} · ${l}`;
+  }
+  function addBlock(spec) {
+    const k = state.blocks.length;
+    state.blocks.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), spec, x: 20 + (k % 2) * 620, y: 60 + Math.floor(k / 2) * 420 + (k % 2) * 20 });
+    save();
+    renderBlocks();
+    schedule();
+  }
+  function removeBlock(id) {
+    state.blocks = state.blocks.filter((b) => b.id !== id);
+    save();
+    renderBlocks();
+    schedule();
+  }
+  function renderBlocks() {
+    const board = $("board");
+    const keep = new Set(state.blocks.map((b) => b.id));
+    [...board.querySelectorAll(".block")].forEach((el) => { if (!keep.has(el.dataset.id)) el.remove(); });
+    state.blocks.forEach((b, i) => {
+      let el = board.querySelector(`.block[data-id="${b.id}"]`);
+      if (!el) {
+        el = document.createElement("article");
+        el.className = "block";
+        el.dataset.id = b.id;
+        el.innerHTML = `<header><span class="handle" title="drag">⋮⋮</span><h2></h2><button class="close" title="remove">×</button></header><div class="body"></div>`;
+        el.querySelector(".close").addEventListener("click", () => removeBlock(b.id));
+        makeDraggable(el, b);
+        observeSize(el, b);
+        board.appendChild(el);
+      }
+      el.style.left = b.x + "px";
+      el.style.top = b.y + "px";
+      if (b.w) el.style.width = b.w + "px";
+      if (b.h) el.style.height = b.h + "px";
+      el.querySelector("h2").innerHTML = `${esc(b.spec.name)}<small>${esc(describe(b.spec))}</small>`;
+      const res = results && results.blocks[i];
+      if (res) { el.querySelector(".body").innerHTML = renderResult(res, b.spec); fitRows(el); }
+      else if (!el.querySelector(".body").innerHTML) el.querySelector(".body").innerHTML = '<div class="lev">computing…</div>';
+    });
+    $("empty").hidden = state.blocks.length > 0;
+    fitBoard();
+  }
+  function fitBoard() {
+    // the board grows so every block (plus room to drag further) stays reachable by scrolling
+    const board = $("board");
+    let w = 1200, h = 900;
+    state.blocks.forEach((b) => { w = Math.max(w, b.x + (b.w || 600) + 300); h = Math.max(h, b.y + (b.h || 420) + 300); });
+    board.style.minWidth = w + "px";
+    board.style.minHeight = h + "px";
+  }
+  function fitRows(el) {
+    // spread the party table over the block's free height: taller block = taller rows, bars and text
+    const body = el.querySelector(".body"), table = el.querySelector("table.main");
+    if (!table) return;
+    const rows = Math.max(1, table.querySelectorAll("tr").length - 1);  // data rows only, header is fixed
+    let fixed = 20 + 8;  // header row + table margins
+    [...body.children].forEach((c) => { if (c !== table) fixed += c.offsetHeight; });
+    const avail = body.clientHeight - fixed - 6;
+    const row = Math.max(20, avail / rows);  // no upper cap: a tall block means tall rows
+    body.style.setProperty("--row", row.toFixed(1) + "px");
+  }
+  let sizeTimer = null;
+  function observeSize(el, b) {
+    // the browser's own resize corner changes the element; remember the result
+    new ResizeObserver(() => {
+      if (!el.isConnected) return;
+      const w = Math.round(el.offsetWidth), h = Math.round(el.offsetHeight);
+      fitRows(el);
+      if (w === (b.w || 600) && (!b.h || h === b.h)) return;
+      if (w !== b.w) b.w = w;
+      if (h !== b.h) b.h = h;
+      clearTimeout(sizeTimer);
+      sizeTimer = setTimeout(() => { save(); fitBoard(); }, 150);
+    }).observe(el);
+  }
+  $("reset-layout").addEventListener("click", () => {
+    state.blocks.forEach((b, k) => { delete b.w; delete b.h; b.x = 20 + (k % 2) * 620; b.y = 60 + Math.floor(k / 2) * 420 + (k % 2) * 20; });
+    $("board").querySelectorAll(".block").forEach((el) => { el.style.width = ""; el.style.height = ""; });
+    save();
+    renderBlocks();
+  });
+  function renderResult(res, spec) {
+    const n = results.n_voters || 1;
+    const top = Math.max(1, ...res.rows.map((r) => r.seats));
+    const rows = res.rows.map((r) => {
+      const bar = GRADES.map((g) => `<i style="width:${(100 * r.counts[g] / n).toFixed(2)}%;background:${GCOL[g]}"></i>`).join("");
+      const title = GRADES.map((g) => `${g}: ${r.counts[g]}`).join("\n");
+      return `<tr><td>${esc(r.party)}</td>` +
+        `<td class="grades"><div class="gbar" title="${esc(title)}">${bar}</div></td>` +
+        `<td>${esc(r.median)}</td><td>${r.p.toFixed(2)}</td><td>${r.q.toFixed(2)}</td>` +
+        `<td>${r.votes}</td><td>${(100 * r.vote_share).toFixed(1)}%</td>` +
+        `<td><b>${r.seats}</b></td><td>${(100 * r.seat_share).toFixed(1)}%</td>` +
+        `<td class="seatbar"><span class="sbar"><i style="width:${(100 * r.seats / top).toFixed(1)}%"></i></span></td></tr>`;
+    }).join("");
+    let lev;
+    if (res.levelling === null) lev = "No levelling seats: all 169 mandates counted in the districts.";
+    else {
+      const parts = Object.entries(res.levelling).map(([p, k]) => `${esc(p)} <b>${k}</b>`).join(", ") || "none";
+      const elig = spec.levelling === "threshold" ? ` · eligible (4 %): ${esc((res.eligible || []).join(", "))}` : "";
+      lev = `Utjevning: ${parts}${elig}`;
+    }
+    const dist = res.districts.map((d) =>
+      `<tr><td>${esc(d.name)}</td><td>${d.seats}</td><td>${d.voters === null ? "national" : d.voters}</td>` +
+      `<td>${esc(Object.entries(d.by_party).map(([p, k]) => `${p} ${k}`).join(", ")) || "-"}</td></tr>`).join("");
+    return `<div class="verdict">Largest: ${esc(res.largest.join(" = "))}</div>` +
+      `<table class="main"><tr><th>Party</th><th class="grades">Grades</th><th>Median</th><th>p</th><th>q</th><th>Votes</th><th>%</th><th>Seats</th><th>%</th><th class="seatbar"></th></tr>${rows}</table>` +
+      `<div class="lev">${lev}</div>` +
+      `<details><summary>districts</summary><table><tr><th>District</th><th>Seats</th><th>Voters</th><th>Mandates</th></tr>${dist}</table></details>`;
+  }
+  function makeDraggable(el, b) {
+    // Drag from anywhere on the block. Buttons, the districts fold and the resize corner
+    // keep their own behaviour; a click without movement is still a click.
+    let dx = 0, dy = 0, sx = 0, sy = 0, armed = false;
+    const CORNER = 18;
+    el.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest("button, summary, input, select, textarea, a")) return;
+      const r = el.getBoundingClientRect();
+      if (e.clientX > r.right - CORNER && e.clientY > r.bottom - CORNER) return;  // resize corner
+      armed = true;
+      sx = e.clientX; sy = e.clientY;
+      dx = e.clientX - b.x; dy = e.clientY - b.y;
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (!armed) return;
+      if (!el.classList.contains("dragging")) {
+        if (Math.abs(e.clientX - sx) < 4 && Math.abs(e.clientY - sy) < 4) return;  // not a drag yet
+        el.classList.add("dragging");
+        el.setPointerCapture(e.pointerId);
+        el.style.zIndex = 20;
+      }
+      b.x = Math.max(0, e.clientX - dx); b.y = Math.max(0, e.clientY - dy);
+      el.style.left = b.x + "px"; el.style.top = b.y + "px";
+      e.preventDefault();
+    });
+    const stop = () => {
+      armed = false;
+      if (el.classList.contains("dragging")) { el.classList.remove("dragging"); el.style.zIndex = ""; save(); fitBoard(); }
+    };
+    el.addEventListener("pointerup", stop);
+    el.addEventListener("pointercancel", stop);
+    el.addEventListener("lostpointercapture", stop);
+  }
+
+  // ---------- running
+  function schedule() { clearTimeout(timer); timer = setTimeout(run, 250); }
+  async function run() {
+    if (inflight) { pending = true; return; }
+    if (!state.blocks.length) { results = { n_voters: 0, blocks: [] }; $("status").textContent = ""; renderBlocks(); return; }
+    $("progress").classList.add("on");
+    const t0 = performance.now();
+    inflight = fetch("/api/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voters: state.voters, systems: state.blocks.map((b) => b.spec) }),
+    });
+    try {
+      const r = await inflight;
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      results = data;
+      $("banner").classList.remove("on");
+      $("status").textContent = `${data.source} · ${data.n_voters} voters · ${data.parties.length} parties · ${((performance.now() - t0) / 1000).toFixed(2)} s`;
+      renderBlocks();
+    } catch (e) {
+      $("banner").textContent = e.message;
+      $("banner").classList.add("on");
+    } finally {
+      inflight = null;
+      $("progress").classList.remove("on");
+      if (pending) { pending = false; run(); }
+    }
+  }
+
+  // ---------- dialog
+  const dlg = $("dlg"), form = $("dlg-form");
+  let nameTouched = false;
+  function dialogSpec() {
+    const f = new FormData(form);
+    let split = f.get("split");
+    if (split === "custom") split = $("custom").value.trim() || "1";
+    return { name: $("name").value.trim(), method: f.get("method"), split, levelling: f.get("levelling") };
+  }
+  function autoName() {
+    if (nameTouched) return;
+    const s = dialogSpec();
+    const m = s.method === "grades" ? "Majority Judgment" : "Single vote";
+    const sp = s.split === "norway" ? "Sainte-Laguë" : s.split === "1" ? "WTA" : s.split;
+    const l = s.levelling === "threshold" ? "4 %" : s.levelling === "open" ? "open" : "no levelling";
+    $("name").value = `${m} · ${sp} · ${l}`;
+  }
+  form.addEventListener("input", (e) => { if (e.target.id === "name") nameTouched = true; else autoName(); });
+  $("custom").addEventListener("focus", () => { form.querySelector('input[name=split][value=custom]').checked = true; autoName(); });
+  $("new").addEventListener("click", () => { form.reset(); nameTouched = false; autoName(); dlg.showModal(); });
+  $("cancel").addEventListener("click", () => dlg.close());
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const spec = dialogSpec();
+    if (!spec.name) spec.name = "System";
+    dlg.close();
+    addBlock(spec);
+  });
+
+  // ---------- presets + boot
+  fetch("/api/presets").then((r) => r.json()).then((p) => {
+    presets = p;
+    $("presets").innerHTML = p.presets.map((s, i) => `<button data-i="${i}">${esc(s.name)}</button>`).join(" ");
+    $("presets").querySelectorAll("button").forEach((btn) => btn.addEventListener("click", () => addBlock({ ...p.presets[+btn.dataset.i] })));
+    fillSidebar();
+    if (!state.seeded) { state.seeded = true; p.presets.forEach((s) => addBlock({ ...s })); }
+    else { renderBlocks(); schedule(); }
+  });
+  applyTheme();
+})();
+</script>
+</body>
+</html>
