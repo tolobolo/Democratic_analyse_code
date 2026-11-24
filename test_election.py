@@ -409,13 +409,18 @@ def test_norway_split_mj_uses_good_or_better():
     assert abs(e.mj.seats["A"] - e.mj.seats["B"]) <= 19  # proportional, not winner takes all
 
 
-def test_norway_split_mj_levelling_uses_supporters():
+def test_norway_split_mj_levelling_uses_quantile_rule():
     parties = ["A", "B"]
-    # Everyone's favourite is A (all votes), but everyone also grades B Good: supporters 20 vs 20.
+    # Everyone grades A Excellent and B Good: every slice of A beats every slice of B,
+    # in the districts and in the national levelling count alike.
     db = {d: [{"A": G.EXCELLENT, "B": G.GOOD}] * 20 for d in DISTRICTS}
     e = count_all(db, parties, random.Random(0), NORWAY, True)
-    assert e.storting.seats == {"A": 169, "B": 0}  # votes: A has them all
-    assert abs(e.mj.seats["A"] - e.mj.seats["B"]) <= 1  # supporters: equal, after levelling too
+    assert e.storting.seats == {"A": 169, "B": 0}
+    assert e.mj.seats == {"A": 169, "B": 0}
+    # Half the voters grade A Excellent / B Poor, the other half B Excellent / A Poor: equal slices
+    db = {d: [{"A": G.EXCELLENT, "B": G.POOR}] * 10 + [{"A": G.POOR, "B": G.EXCELLENT}] * 10 for d in DISTRICTS}
+    e = count_all(db, parties, random.Random(0), NORWAY, True)
+    assert abs(e.mj.seats["A"] - e.mj.seats["B"]) <= 19
 
 
 # ---------------------------------------------------------------- fast key and system specs
@@ -574,3 +579,82 @@ def test_every_method_and_split_hands_out_169():
     row = out["blocks"][0]["rows"][0]
     assert {"score", "approvals", "approval_share"} <= set(row)
     assert 0 <= row["score"] <= 5
+
+
+# ---------------------------------------------------------------- quantile Majority Judgment
+
+def _sorted(**lists):
+    from election import sort_best_first
+    return {c: sort_best_first(g) for c, g in lists.items()}
+
+
+def test_quantile_mj_worked_example():
+    from election import quantile_mj
+    # 100 voters, 4 seats, Q = 25. A: 40 Excellent + 60 Reject. B: 100 Good.
+    sg = _sorted(A=[G.EXCELLENT] * 40 + [G.REJECT] * 60, B=[G.GOOD] * 100)
+    # Sainte-Lague (first divisor 1): A judged at 12.5 -> E, 37.5 -> E, 62.5 -> R; B always Good
+    assert quantile_mj(sg, 4, first_divisor=1.0) == {"A": 2, "B": 2}
+    # Norway's 1.4: first position 17.5 -> still Excellent for A
+    assert quantile_mj(sg, 4) == {"A": 2, "B": 2}
+    # D'Hondt judges the end of each slice: A at 25 -> E, 50 -> R; B Good everywhere -> A 1, B 3
+    assert quantile_mj(sg, 4, dhondt=True) == {"A": 1, "B": 3}
+
+
+def test_quantile_mj_one_seat_is_majority_judgment():
+    from election import quantile_mj
+    rng = random.Random(21)
+    for _ in range(50):
+        parties = ["A", "B", "C"]
+        ballots = [{c: rng.choice(list(G)) for c in parties} for _ in range(rng.randint(1, 40))]
+        sg = {c: sorted(grades_for(ballots, c), key=GRADES_DESC.index) for c in parties}
+        seats = quantile_mj(sg, 1, first_divisor=1.0)
+        winner = [c for c, n in seats.items() if n == 1][0]
+        assert winner == mj_winner(ballots, parties)
+
+
+def test_quantile_mj_one_excellent_is_not_a_dictator():
+    from election import quantile_mj
+    # X: one Excellent, 99 Reject. Y: 30 Good, 70 Reject. 4 seats, Q = 25.
+    sg = _sorted(X=[G.EXCELLENT] + [G.REJECT] * 99, Y=[G.GOOD] * 30 + [G.REJECT] * 70)
+    # Y's first slice (middle: Good) beats X's first slice (middle: Reject): Y takes the first seat
+    assert quantile_mj(sg, 1, first_divisor=1.0) == {"X": 0, "Y": 1}
+    seats = quantile_mj(sg, 4, first_divisor=1.0)
+    assert seats["Y"] >= seats["X"]  # X's lone Excellent never outranks real support
+    # against a party with real support X gets nothing
+    sg = _sorted(X=[G.EXCELLENT] + [G.REJECT] * 99, Z=[G.GOOD] * 100)
+    assert quantile_mj(sg, 4, first_divisor=1.0) == {"X": 0, "Z": 4}
+
+
+def test_quantile_mj_hands_out_all_seats_and_levelling():
+    from election import SystemSpec, make_voters, run_system, DHONDT
+    parties = ["A", "B", "C", "D"]
+    v = make_voters(parties, simulate_districts(parties, 3000, random.Random(13)), random.Random(0))
+    for split in (NORWAY, DHONDT):
+        for lev in ("threshold", "open", "none"):
+            res = run_system(SystemSpec("q", "grades", split, lev), v)
+            assert sum(res.seats.values()) == 169
+            if lev != "none":
+                assert sum(res.by_district[LEVELLING].values()) == 19
+
+
+def test_sainte_lague_cap():
+    from election import quantile_mj, SL_CAP, MJ_CAP, SystemSpec, make_voters, run_system, parse_split
+    assert parse_split("norway_cap") == SL_CAP and MJ_CAP == 2
+    # 40% Excellent / 60% Reject (median Reject) vs all Good: plain rule 3-5, cap 0-8
+    sg = _sorted(OK=[G.GOOD] * 1000, Extreme=[G.EXCELLENT] * 400 + [G.REJECT] * 600)
+    assert quantile_mj(sg, 8, first_divisor=1.0) == {"OK": 5, "Extreme": 3}
+    assert quantile_mj(sg, 8, first_divisor=1.0, cap=2) == {"OK": 8, "Extreme": 0}
+    # 55% Excellent (median Excellent): the cap does not bind, fans count in full, no floor effect
+    sg = _sorted(OK=[G.GOOD] * 1000, Fans=[G.EXCELLENT] * 550 + [G.REJECT] * 450)
+    assert quantile_mj(sg, 8, first_divisor=1.0, cap=2) == {"OK": 4, "Fans": 4}
+    # broad lukewarm party beats a small enthusiastic one with the cap
+    sg = _sorted(Broad=[G.VERY_GOOD] * 120 + [G.ACCEPTABLE] * 500 + [G.POOR] * 380,
+                 Narrow=[G.EXCELLENT] * 120 + [G.POOR] * 300 + [G.REJECT] * 580)
+    plain = quantile_mj(sg, 8, first_divisor=1.0)
+    capped = quantile_mj(sg, 8, first_divisor=1.0, cap=2)
+    assert capped["Broad"] >= plain["Broad"] and capped["Broad"] > capped["Narrow"]
+    # whole system: sums to 169, and vote-based methods are unchanged by the cap
+    parties = ["A", "B", "C"]
+    v = make_voters(parties, simulate_districts(parties, 3000, random.Random(17)), random.Random(0))
+    assert sum(run_system(SystemSpec("c", "grades", SL_CAP, "threshold"), v).seats.values()) == 169
+    assert run_system(SystemSpec("c", "votes", SL_CAP, "threshold"), v).seats == run_system(SystemSpec("n", "votes", NORWAY, "threshold"), v).seats

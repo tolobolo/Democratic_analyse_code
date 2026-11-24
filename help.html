@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How the voting board works</title>
+<style>
+  :root { --bg: #fafafa; --panel: #fff; --ink: #1f2328; --muted: #6b7280; --line: #e5e7eb; --accent: #2563eb; --soft: #f3f4f6;
+          --g-exc: #1b7f3b; --g-vg: #5cb85c; --g-good: #a8d08d; --g-acc: #f0d66b; --g-poor: #f0a04b; --g-rej: #d9534f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121417; --panel: #1b1e23; --ink: #e6e8eb; --muted: #9aa3ad; --line: #2b3138; --accent: #7aa2ff; --soft: #23282e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); display: flex; }
+  nav { width: 240px; flex: 0 0 240px; height: 100vh; position: sticky; top: 0; overflow: auto; padding: 18px 16px; border-right: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+  nav a { display: block; color: var(--ink); text-decoration: none; padding: 3px 0; }
+  nav a:hover { color: var(--accent); }
+  nav .back { display: inline-block; margin-bottom: 14px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); }
+  main { max-width: 760px; padding: 24px 40px 80px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  h2 { font-size: 20px; margin: 36px 0 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 22px 0 6px; }
+  p { margin: 8px 0; }
+  .scale { display: flex; gap: 4px; margin: 8px 0; }
+  .scale span { flex: 1; text-align: center; padding: 6px 2px; border-radius: 4px; color: #fff; font-size: 12px; font-weight: 600; }
+  table { border-collapse: collapse; margin: 8px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+  th { background: var(--soft); }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; background: var(--soft); padding: 1px 4px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 10px 12px; border-radius: 6px; overflow: auto; font-size: 13px; }
+  .muted { color: var(--muted); }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+<nav>
+  <a class="back" href="/">← Back to the board</a>
+  <a href="#what">What is this?</a>
+  <a href="#voters">The voters</a>
+  <a href="#count">Five ways to count</a>
+  <a href="#split">Sharing the seats</a>
+  <a href="#utjevning">The 19 extra seats</a>
+  <a href="#real">Real voters</a>
+  <a href="#board">Using the board</a>
+  <a href="#code">How it is programmed</a>
+  <a href="#words">Little word list</a>
+</nav>
+<main>
+<h1>How the voting board works</h1>
+
+<h2 id="what">What is this?</h2>
+<p>The board is a simulator. One group of voters fills in one ballot each. Then every block on the board counts those same ballots with its own rules and hands out the 169 mandates of the Norwegian Storting. Because the voters never change between blocks, every difference you see comes from the rules, not from the people.</p>
+
+<h2 id="voters">The voters</h2>
+<p>A ballot is a grade for every party on this six-step scale:</p>
+<div class="scale">
+  <span style="background:var(--g-exc)">Excellent</span><span style="background:var(--g-vg)">Very Good</span><span style="background:var(--g-good)">Good</span>
+  <span style="background:var(--g-acc);color:#333">Acceptable</span><span style="background:var(--g-poor)">Poor</span><span style="background:var(--g-rej)">Reject</span>
+</div>
+<p><b>Random voters.</b> Each voter picks one favourite party at random and gives it Excellent. Every other party gets a random grade from Very Good down to Reject. There is no hidden formula about left or right, because real people do not follow formulas either. Voters are spread over Norway's 19 electoral districts in proportion to population, so Oslo gets about ten times as many as Finnmark.</p>
+<p><b>Real voters.</b> See <a href="#real">Real voters</a> below.</p>
+<p><b>A missing grade counts as Reject.</b> Every party must have exactly one grade from every voter, otherwise the medians of different parties could not be compared.</p>
+
+<h2 id="count">Five ways to count</h2>
+<p>A block's first choice is the <i>method</i>: how the ballots are read to put the parties in order inside each district.</p>
+
+<h3>Majority Judgment</h3>
+<p>Invented by the French researchers Michel Balinski and Rida Laraki. For each party, sort its grades best to worst and take the middle one, the <b>median</b> or majority grade. If the count is even and the two middle grades differ, the worst grade is dropped and the median is taken again. Highest median wins.</p>
+<p><b>Ties.</b> If two parties share the same median, the one with more grades <i>above</i> the median wins. If still tied, the worst grade is removed from both and the whole comparison starts over. The table shows <b>p</b>, the share of voters above the median, and <b>q</b>, the share below.</p>
+<p>Why it matters: a candidate needs a good grade from the broad middle of the country, not only from a loyal group. Giving your favourite Excellent and everyone else Reject does not move a median unless your group is over half of all voters.</p>
+
+<h3>Score voting</h3>
+<p>The same ballots, but grades become points: Excellent 5, Very Good 4, Good 3, Acceptable 2, Poor 1, Reject 0. Parties are ranked by their average. This is the only place in the program where a grade is turned into a number. The difference from Majority Judgment is mean versus median: a few very high grades can lift an average but cannot lift a median.</p>
+
+<h3>Approval voting</h3>
+<p>A grade of Good or better counts as a tick. The party with the most ticks ranks first. Nobody ranks anyone, and liking two parties never hurts either of them.</p>
+
+<h3>Single vote</h3>
+<p>Each voter's favourite is their one vote. Parties are ranked by votes. With random voters the favourite is the party graded Excellent. With real survey voters it is the party they said they voted for.</p>
+
+<h3>Two-round</h3>
+<p>Round one is the single vote. If no party passes 50 % in the district, the top two go to a runoff. Every voter backs whichever of the two they graded higher. A voter who gave both the same grade stays home. The runoff winner ranks first, the loser second, the rest by first-round votes. This is how France and Brazil elect their president.</p>
+
+<h2 id="split">Sharing the seats</h2>
+<p>A block's second choice is the <i>split</i>: how a district's mandates are divided once the parties are in order. Each district counts one mandate less than its official number; the 19 set aside are explained in the next section.</p>
+<table>
+<tr><th>Split</th><th>What happens in a district with 8 mandates</th></tr>
+<tr><td>Winner takes all</td><td>First place gets 8. Used in the United States and for the French presidency.</td></tr>
+<tr><td>2,1,1</td><td>First 4, second 2, third 2. Nobody else gets any.</td></tr>
+<tr><td>3,2,1</td><td>First 4, second 3, third 1, by largest remainder.</td></tr>
+<tr><td>Custom</td><td>Any list of weights, in ranking order.</td></tr>
+<tr><td>Norwegian, Sainte-Laguë</td><td>Proportional. Each party's count is divided by 1.4, then 3, 5, 7… and the 8 mandates go one by one to the highest result. This is Norway's own rule.</td></tr>
+<tr><td>Sainte-Laguë cap</td><td>Same as Norwegian for vote-based methods. For Majority Judgment it adds the median cap described below.</td></tr>
+<tr><td>D'Hondt</td><td>Proportional too, but dividing by 1, 2, 3, 4… which helps big parties a little more.</td></tr>
+</table>
+<p>The proportional splits need something to divide. For single vote and two-round it is the votes. For approval it is the ticks. For score it is the points.</p>
+<h3>Majority Judgment with a proportional split</h3>
+<p>A median is a grade, not a number, so it cannot be divided. Instead the divisor idea is translated into grades. Call Q the number of voters per mandate in the district; 100 voters and 4 mandates give Q = 25. Line a party's voters up by the grade they gave it, best first, and cut the line into slices of Q voters, one slice per mandate. A party holding k mandates is asking for its (k+1)-th slice, and that slice is judged by the grade of the voter in its middle. Mandates go one at a time to the party whose next slice has the best grade. Ties use the normal Majority Judgment tie-break on the slice.</p>
+<p>With Sainte-Laguë the judged positions are ½Q, 1½Q, 2½Q…, the middles of the slices, matching the divisors 1, 3, 5. Norway's first divisor 1.4 becomes 0.7Q for the first mandate. With D'Hondt the positions are Q, 2Q, 3Q…, the end of each slice, matching the divisors 1, 2, 3. With a single mandate the judged position is the median, so this is ordinary Majority Judgment.</p>
+<p>Example: 100 voters, 4 mandates. Party A has 40 Excellent and 60 Reject, party B has 100 Good. A is judged Excellent, Excellent, then Reject; B is Good every time. Result A 2, B 2. A's intense support earns mandates until it runs out. A single Excellent can never win a mandate on its own, because the middle of a 25-voter slice is Reject when 24 of them gave Reject.</p>
+<h3>The Sainte-Laguë cap</h3>
+<p>The slice rule looks only at the top of each party's line, so two parties with the same small group of enthusiasts tie slice for slice, and the one with broad support further down never gets credit for it before the mandates run out. In the 2017 survey this put Rødt, median Poor, ahead of KrF, median Acceptable, in the district count.</p>
+<p>The cap fixes that with one extra rule: a slice can show at most two grades above the party's own median in the district. A party with median Acceptable can present its slices as Very Good at best; a party with median Poor can present Good at best; a party with median Reject can present Acceptable at best. Grades are only ever lowered, never lifted. With it, KrF ends ahead of Rødt, and the rest of the result barely moves.</p>
+<p>What the cap means: a party's fans can carry it only two steps beyond what most of its voters think. A party that 40 % love and 60 % reject has median Reject, so it cannot beat a party everyone finds Good, just as it would lose a single-seat Majority Judgment election to it. Once more than half of a party's voters grade it well, its enthusiasts count in full. There is deliberately no floor in the other direction: lifting a party's bad slices towards its median would hand it mandates on behalf of voters who rejected it.</p>
+<p>The levelling seats for such a block are computed the same way: the fair national share comes from running the slice rule, with the cap if the block uses it, on all ballots for 169 mandates. The 4 % threshold is measured in supporters, meaning voters who graded the party Good or better.</p>
+
+<h2 id="utjevning">The 19 extra seats, Utjevning</h2>
+<p>Each of the 19 districts gives up one mandate. After the district count, every party's fair national share of all 169 seats is computed with Sainte-Laguë on the national count. A party already above its fair share is set aside. The others receive fair share minus district seats, and that always adds up to exactly 19. These are the levelling seats.</p>
+<p>A block's third choice is what to do with them:</p>
+<ul>
+<li><b>Sperregrense 4 %.</b> Only parties with at least 4 % of the national vote may receive levelling seats. This is Norway's real rule.</li>
+<li><b>Open to all.</b> Same rule, but every party may receive them, however small.</li>
+<li><b>None.</b> No levelling seats. Every district keeps its full official number of mandates and the 169 are all decided locally, as in the United States or France.</li>
+</ul>
+
+<h2 id="real">Real voters</h2>
+<p>The Comparative Study of Electoral Systems is an international survey. Norway took part in 1997, 2001, 2005, 2009, 2013 and 2017, with about 1,700 to 2,050 respondents each time. Each respondent rated every party from 0 to 10 and reported their vote. The ratings become grades like this:</p>
+<table>
+<tr><th>Rating</th><td>9–10</td><td>7–8</td><td>5–6</td><td>3–4</td><td>1–2</td><td>0</td><td>no answer</td></tr>
+<tr><th>Grade</th><td>Excellent</td><td>Very Good</td><td>Good</td><td>Acceptable</td><td>Poor</td><td>Reject</td><td>Reject</td></tr>
+</table>
+<p>The reported vote is used as the single vote. If it is missing or for a party nobody rated that year, the highest-graded party is used instead. The survey has no county for each person, so respondents are spread over the districts at random by population. Party names were matched to the survey's codes by comparing vote shares with the official results year by year.</p>
+<p>The survey file is not in the repository, because its licence does not allow sharing it. Download <code>cses_imd_csv.zip</code> from cses.org into the <code>data</code> folder. The first run extracts the Norwegian rows into a small cache.</p>
+
+<h2 id="board">Using the board</h2>
+<ul>
+<li>The sidebar holds the voters: data source, parties, how many voters, and the random seed. Same seed, same voters, so you can change one rule and see what it alone did.</li>
+<li>"New system" asks for method, split and levelling, and adds a block. The preset buttons add a ready-made Norwegian, American or French system.</li>
+<li>Every change re-runs all blocks on the same voters. Blocks can be dragged anywhere and resized at the bottom-right corner. The layout is remembered in your browser.</li>
+<li>In a block: the largest party, then one row per party with what that method counts: the grade bar, median, p and q for Majority Judgment; the grade bar and average points for score voting; approvals for approval voting; round-one votes for single vote and two-round. Seats always. "districts" opens the mandates in each district.</li>
+</ul>
+
+<h2 id="code">How it is programmed</h2>
+<p>Everything is written in Python and plain JavaScript, with no libraries to install. There are only a few files on purpose, so it can be read in one sitting.</p>
+<table>
+<tr><th>File</th><th>What it does</th></tr>
+<tr><td><code>election.py</code></td><td>All the counting. The grade scale, Majority Judgment, score, approval, single vote, two-round, the splits, levelling, the districts table, the random voters, the survey loader, and the command-line report. Nothing here knows about the browser.</td></tr>
+<tr><td><code>ui.py</code></td><td>A tiny web server. It sends <code>board.html</code> to the browser and answers one question: "here are the voter settings and a list of systems, what are the results?" It keeps the last few electorates in memory so adding a block does not recount the voters.</td></tr>
+<tr><td><code>board.html</code></td><td>The page you look at: the sidebar, the blocks, dragging, resizing, the New system window, dark mode. It asks the server for results whenever something changes and draws the tables.</td></tr>
+<tr><td><code>test_election.py</code></td><td>Over forty automatic checks: hand-computed examples for every rule, every method and split handing out exactly 169 seats, the survey loader, and a proof that the fast ranking gives the same order as the slow one on hundreds of random cases.</td></tr>
+<tr><td><code>agent.md</code></td><td>The rulebook for anyone, human or AI, who works on the code next.</td></tr>
+</table>
+
+<h3>The grades have no numbers</h3>
+<p>The six grades are an ordered list, not numbers. Comparing two grades means looking at which comes first in the list. Medians, ties, supporters and approvals all work on that order. Only score voting turns grades into points, because that is what score voting is.</p>
+
+<h3>One electorate, many systems</h3>
+<p>A system is a small record with four fields: a name, a method, a split and a levelling rule. The function <code>run_system</code> takes one such record and the shared voters and returns seats per party and per district. The board calls it once per block. Presets are just records with the fields filled in.</p>
+<pre>SystemSpec("Norwegian", method="votes",    split="norway", levelling="threshold")
+SystemSpec("American",  method="votes",    split="1",      levelling="none")
+SystemSpec("French",    method="tworound", split="1",      levelling="none")</pre>
+
+<h3>Why it is fast</h3>
+<p>Comparing two parties under Majority Judgment can take many rounds of "remove the worst grade and look again". Doing that for every pair of parties in every district was slow. Instead, each party gets a sort key: one entry per round, built from its grade counts in one pass. Sorting by that key gives exactly the same order, and a test checks this against the slow way on three hundred random cases. A board with nine parties and five blocks now counts in well under half a second.</p>
+
+<h3>How a run travels</h3>
+<ol>
+<li>You change something. The page waits a quarter of a second in case you keep typing.</li>
+<li>The page sends the voter settings and the list of blocks to <code>/api/run</code>.</li>
+<li>The server builds or reuses the voters, runs every system, and sends back numbers.</li>
+<li>The page redraws every block in place. No reload.</li>
+</ol>
+
+<h2 id="words">Little word list</h2>
+<table>
+<tr><th>Word</th><th>Meaning</th></tr>
+<tr><td>Mandate, seat</td><td>One chair in the Storting. There are 169.</td></tr>
+<tr><td>District</td><td>One of 19 areas of Norway. Each has a fixed number of mandates.</td></tr>
+<tr><td>Median</td><td>The middle value when everything is lined up from best to worst.</td></tr>
+<tr><td>p and q</td><td>Share of voters above and below a party's median grade.</td></tr>
+<tr><td>Sainte-Laguë</td><td>A way to share seats fairly: divide by 1.4, 3, 5, 7… Norway's rule.</td></tr>
+<tr><td>D'Hondt</td><td>Like Sainte-Laguë but dividing by 1, 2, 3, 4…</td></tr>
+<tr><td>Utjevning</td><td>The 19 levelling seats that even out the district results.</td></tr>
+<tr><td>Sperregrense</td><td>The 4 % a party needs to get levelling seats.</td></tr>
+<tr><td>Seed</td><td>The starting number for the dice. Same seed, same pretend voters.</td></tr>
+<tr><td>CSES</td><td>The international survey the real voters come from.</td></tr>
+</table>
+</main>
+</body>
+</html>

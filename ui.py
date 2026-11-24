@@ -4,7 +4,7 @@ Run:  python3 ui.py
 Opens http://127.0.0.1:8000 in your browser. Ctrl+C to stop.
 Set UI_PORT=8765 to use another port.
 
-Serves board.html and one JSON endpoint, POST /api/run:
+Serves board.html, help.html (at /help) and one JSON endpoint, POST /api/run:
   {"voters": {"source": "random" | "cses_2017", "parties": [...], "n": 10000, "seed": 42},
    "systems": [{"name": ..., "method": "grades" | "votes", "split": "1", "levelling": "threshold"}, ...]}
 All voting logic lives in election.py; this file only moves JSON around.
@@ -21,7 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from election import CSES_YEARS, PRESETS, SystemSpec, Voters, build_voters, run_board
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("UI_PORT", "8000"))
-PAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "board.html")
+HERE = os.path.dirname(os.path.abspath(__file__))
+PAGE_PATH = os.path.join(HERE, "board.html")
+HELP_PATH = os.path.join(HERE, "help.html")
 
 _voters_cache: "OrderedDict[str, Voters]" = OrderedDict()
 _cache_lock = threading.Lock()
@@ -77,10 +79,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?")[0] == "/api/presets":
             self._json(200, presets_payload())
             return
-        if self.path.split("?")[0] != "/":
+        path = self.path.split("?")[0]
+        pages = {"/": PAGE_PATH, "/help": HELP_PATH}
+        if path not in pages:
             self._json(404, {"error": "not found"})
             return
-        with open(PAGE_PATH, "rb") as f:
+        with open(pages[path], "rb") as f:
             self._send(200, f.read(), "text/html; charset=utf-8")
 
     def do_POST(self) -> None:

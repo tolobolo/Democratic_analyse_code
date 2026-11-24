@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import math
 import os
 import random
 import zipfile
@@ -402,7 +403,9 @@ def simulate_districts(candidates: list[str], n_voters: int, rng: random.Random)
 
 NORWAY = "norway"  # split option: modified Sainte-Lague per district, like the Storting count
 DHONDT = "dhondt"  # split option: D'Hondt divisors 1, 2, 3, ...
-PROPORTIONAL = {NORWAY: sainte_lague, DHONDT: dhondt}
+SL_CAP = "norway_cap"  # split option: Sainte-Lague; for Majority Judgment with the median cap (MJ_CAP)
+MJ_CAP = 2  # Sainte-Lague cap: a slice may show at most this many grades above the party's median
+PROPORTIONAL = {NORWAY: sainte_lague, DHONDT: dhondt, SL_CAP: sainte_lague}
 MJ_SUPPORT_GRADE = Grade.GOOD  # "supporter" / approval: graded the party this or better
 Split = "list[int] | str"
 
@@ -499,6 +502,53 @@ def approval_rank(ballots: list[Ballot], candidates: list[str]) -> list[str]:
     return sorted(candidates, key=lambda c: -app[c])
 
 
+def quantile_mj(sorted_grades: dict[str, list[Grade]], seats: int, first_divisor: float = FIRST_DIVISOR,
+                dhondt: bool = False, cap: int | None = None) -> dict[str, int]:
+    """Majority Judgment's own proportional rule: Sainte-Lague or D'Hondt translated to grades.
+
+    Q = voters per mandate. A party's voters are lined up best grade first and cut into
+    slices of Q, one slice per mandate. A party holding k mandates is judged on the grade
+    at one position in its (k+1)-th slice:
+      Sainte-Lague  the middle of the slice, position (2k+1)/2 * Q; Norway's 1.4 first
+                    divisor becomes 0.7 * Q for the first mandate
+      D'Hondt       the end of the slice, position (k+1) * Q
+    Mandates go one at a time to the party with the best grade there. Ties: the normal
+    Majority Judgment tie-break on the slice. With one mandate and first divisor 1 the
+    judged position is the median, so this is plain Majority Judgment.
+
+    cap ("Sainte-Lague cap"): a slice may show at most `cap` grades above the party's own
+    median in the district. A party most of whose voters reject it cannot win mandates on
+    its fans alone. Grades are only ever lowered, never lifted.
+
+    sorted_grades: every party's grades, best first (all parties same length).
+    """
+    candidates = list(sorted_grades)
+    won = {c: 0 for c in candidates}
+    if seats <= 0 or not candidates:
+        return won
+    n = len(next(iter(sorted_grades.values())))
+    if n == 0:
+        return won
+    q = n / seats
+    median_rank = {c: GRADE_INDEX[majority_grade(sorted_grades[c])] for c in candidates} if cap is not None else {}
+    for _ in range(seats):
+        best_key, best = None, None
+        for c in candidates:
+            k = won[c]
+            pos = (k + 1) * q if dhondt else (first_divisor if k == 0 else 2 * k + 1) * q / 2
+            idx = min(n - 1, max(0, math.ceil(pos) - 1))
+            lo, hi = min(n, int(k * q)), min(n, math.ceil((k + 1) * q))
+            slice_key = mj_key(sorted_grades[c][lo:hi]) if hi > lo else [(len(GRADES_DESC), 0)]
+            g = GRADE_INDEX[sorted_grades[c][idx]]
+            if cap is not None:
+                g = max(g, median_rank[c] - cap)  # rank 0 is best, so "above" means a smaller rank
+            key = (g, slice_key)
+            if best_key is None or key < best_key:
+                best_key, best = key, c
+        won[best] += 1
+    return won
+
+
 def two_round(ballots: list[Ballot], votes: dict[str, int], candidates: list[str]) -> tuple[list[str], dict[str, int] | None]:
     """Two-round system. Round one: the single vote. If nobody has over 50%, a runoff between
     the top two: every voter backs whichever of the two they graded higher (equal grade = abstain).
@@ -523,7 +573,7 @@ def two_round(ballots: list[Ballot], votes: dict[str, int], candidates: list[str
 
 
 def levelling_seats(votes: dict[str, int], district_seats: dict[str, int], eligible: list[str],
-                    total: int = STORTING_SEATS) -> dict[str, int]:
+                    total: int = STORTING_SEATS, allocate=None) -> dict[str, int]:
     """Norway's levelling rule: fill each eligible party's deficit against its fair national share.
 
     1. Parties under the threshold keep their district seats; those seats are set aside.
@@ -534,18 +584,20 @@ def levelling_seats(votes: dict[str, int], district_seats: dict[str, int], eligi
     4. Each party left gets fair share minus district seats. These add up to exactly the
        seats the districts gave up (19). The split rule never applies here.
     """
+    if allocate is None:
+        allocate = lambda pool, seats: sainte_lague({c: votes[c] for c in pool}, seats)
     pool = [c for c in eligible]
     fair: dict[str, int] = {}
     while pool:
         remaining = total - sum(n for c, n in district_seats.items() if c not in pool)
-        fair = sainte_lague({c: votes[c] for c in pool}, remaining)
+        fair = allocate(pool, remaining)
         over = [c for c in pool if district_seats[c] > fair[c]]
         if not over:
             break
         pool = [c for c in pool if c not in over]
     out = {c: 0 for c in district_seats}
     if not pool:  # every eligible party is already over its share: plain proportional fallback
-        out.update(sainte_lague({c: votes[c] for c in eligible}, total - sum(district_seats.values())))
+        out.update(allocate(list(eligible), total - sum(district_seats.values())))
         return out
     for c in pool:
         out[c] = fair[c] - district_seats[c]
@@ -621,6 +673,14 @@ class Voters:
     def votes(self) -> dict[str, int]:
         return {c: sum(v[c] for v in self.district_votes.values()) for c in self.candidates}
 
+    def sorted_grades(self, district: str | None = None) -> dict[str, list[Grade]]:
+        """Every party's grades best first, per district or national, computed once."""
+        cache = self.__dict__.setdefault("_sorted_cache", {})
+        if district not in cache:
+            ballots = self.all_ballots if district is None else self.district_ballots[district]
+            cache[district] = {c: sort_best_first(grades_for(ballots, c)) for c in self.candidates}
+        return cache[district]
+
     def mj_ranking(self, district: str) -> list[str]:
         """Majority Judgment order in one district, computed once per electorate."""
         cache = self.__dict__.setdefault("_mj_rank_cache", {})
@@ -685,24 +745,34 @@ def run_system(spec: SystemSpec, v: Voters) -> SeatsResult:
     spec.validate()
     weights = parse_split(spec.split)
     lev = spec.levelling != "none"
+    grade_prop = spec.method == "grades" and is_proportional(weights)  # MJ's own proportional rule
     by_district: dict[str, dict[str, int]] = {}
     for d in DISTRICTS:
         seats = seats_in(d, lev)
-        if is_proportional(weights):
+        if grade_prop:
+            by_district[d] = quantile_mj(v.sorted_grades(d), seats, dhondt=(weights == DHONDT),
+                                         cap=MJ_CAP if weights == SL_CAP else None)
+        elif is_proportional(weights):
             by_district[d] = PROPORTIONAL[weights](v.measure(spec.method, d), seats)
         else:
             by_district[d] = split_seats(seats, v.ranking(spec.method, d), weights)
     res = _finish(by_district, v.candidates)
     if not lev:
         return res
-    # Levelling measure: what the method counts (supporters, points, votes) when the split is
-    # proportional; national votes otherwise. Levelling itself is always Norway's Sainte-Lague rule.
+    # Levelling: fair national share minus district seats (Norway's deficit rule). The fair
+    # share is computed with the method's own count (votes, approvals, points) and Sainte-Lague,
+    # or, for Majority Judgment with a proportional split, with quantile_mj on all ballots.
     measure = v.measure(spec.method) if is_proportional(weights) else v.votes
     eligible = list(v.candidates)
     if spec.levelling == "threshold":
         total = sum(measure.values()) or 1
         eligible = [c for c in v.candidates if measure[c] / total >= THRESHOLD] or list(v.candidates)
-    res.by_district[LEVELLING] = levelling_seats(measure, res.seats, eligible)
+    allocate = None
+    if grade_prop:
+        national = v.sorted_grades()
+        allocate = lambda pool, seats: quantile_mj({c: national[c] for c in pool}, seats, dhondt=(weights == DHONDT),
+                                                   cap=MJ_CAP if weights == SL_CAP else None)
+    res.by_district[LEVELLING] = levelling_seats(measure, res.seats, eligible, allocate=allocate)
     return _finish(res.by_district, v.candidates, eligible)
 
 
@@ -1024,7 +1094,7 @@ def main(argv: list[str] | None = None) -> None:
                     help="on: only parties >= 4%% get Utjevning levelling mandates; off: every party does")
     ap.add_argument("--split", default="1",
                     help="Majority Judgment mandate split per district: 1 (winner takes all), 2,1,1, 3,2,1, "
-                         "norway (modified Sainte-Lague on supporters) or dhondt")
+                         "norway (Sainte-Lague), norway_cap (Sainte-Lague cap) or dhondt")
     ap.add_argument("--cses", type=int, metavar="YEAR", choices=CSES_YEARS,
                     help="use real Norwegian voters from CSES for this election year instead of random ones")
     ap.add_argument("--seed", type=int, default=42)
