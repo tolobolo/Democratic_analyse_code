@@ -116,8 +116,11 @@
     <h3>New system</h3>
     <fieldset>
       <legend>Voting method</legend>
-      <label class="opt"><input type="radio" name="method" value="grades" checked> Majority Judgment <small>voters grade every party, ranked by median</small></label>
-      <label class="opt"><input type="radio" name="method" value="votes"> Single vote <small>one vote for the favourite, ranked by votes</small></label>
+      <label class="opt"><input type="radio" name="method" value="grades" checked> Majority Judgment <small>grades, ranked by median</small></label>
+      <label class="opt"><input type="radio" name="method" value="score"> Score voting <small>grades as points 5…0, ranked by average</small></label>
+      <label class="opt"><input type="radio" name="method" value="approval"> Approval voting <small>a tick for every party graded Good or better</small></label>
+      <label class="opt"><input type="radio" name="method" value="votes"> Single vote <small>one vote for the favourite, most votes first</small></label>
+      <label class="opt"><input type="radio" name="method" value="tworound"> Two-round <small>single vote; no majority → runoff between the top two</small></label>
     </fieldset>
     <fieldset>
       <legend>Mandate split per district</legend>
@@ -125,6 +128,7 @@
       <label class="opt"><input type="radio" name="split" value="2,1,1"> 2,1,1 <small>half to the winner, a quarter each to 2nd and 3rd</small></label>
       <label class="opt"><input type="radio" name="split" value="3,2,1"> 3,2,1 <small>most / ok / least to the top three</small></label>
       <label class="opt"><input type="radio" name="split" value="norway"> Norwegian <small>modified Sainte-Laguë 1.4, 3, 5 …</small></label>
+      <label class="opt"><input type="radio" name="split" value="dhondt"> D'Hondt <small>divide by 1, 2, 3, 4 …</small></label>
       <label class="opt"><input type="radio" name="split" value="custom"> Custom <input type="text" id="custom" placeholder="4,2,1,1" size="10"></label>
     </fieldset>
     <fieldset>
@@ -196,9 +200,11 @@
   ["source", "parties", "n", "seed"].forEach((id) => $(id).addEventListener("input", readSidebar));
 
   // ---------- blocks
+  const METHOD = { grades: "Majority Judgment", score: "Score voting", approval: "Approval voting", votes: "Single vote", tworound: "Two-round" };
+  const SPLIT = { norway: "Sainte-Laguë split", dhondt: "D'Hondt split", "1": "winner takes all" };
   function describe(spec) {
-    const m = spec.method === "grades" ? "Majority Judgment" : "Single vote";
-    const s = spec.split === "norway" ? "Sainte-Laguë split" : spec.split === "1" ? "winner takes all" : `split ${spec.split}`;
+    const m = METHOD[spec.method] || spec.method;
+    const s = SPLIT[spec.split] || `split ${spec.split}`;
     const l = spec.levelling === "threshold" ? "sperregrense 4 %" : spec.levelling === "open" ? "levelling open to all" : "no levelling";
     return `${m} · ${s} · ${l}`;
   }
@@ -291,6 +297,7 @@
       return `<tr><td>${esc(r.party)}</td>` +
         `<td class="grades"><div class="gbar" title="${esc(title)}">${bar}</div></td>` +
         `<td>${esc(r.median)}</td><td>${r.p.toFixed(2)}</td><td>${r.q.toFixed(2)}</td>` +
+        `<td>${r.score.toFixed(2)}</td><td>${(100 * r.approval_share).toFixed(0)}%</td>` +
         `<td>${r.votes}</td><td>${(100 * r.vote_share).toFixed(1)}%</td>` +
         `<td><b>${r.seats}</b></td><td>${(100 * r.seat_share).toFixed(1)}%</td>` +
         `<td class="seatbar"><span class="sbar"><i style="width:${(100 * r.seats / top).toFixed(1)}%"></i></span></td></tr>`;
@@ -306,7 +313,7 @@
       `<tr><td>${esc(d.name)}</td><td>${d.seats}</td><td>${d.voters === null ? "national" : d.voters}</td>` +
       `<td>${esc(Object.entries(d.by_party).map(([p, k]) => `${p} ${k}`).join(", ")) || "-"}</td></tr>`).join("");
     return `<div class="verdict">Largest: ${esc(res.largest.join(" = "))}</div>` +
-      `<table class="main"><tr><th>Party</th><th class="grades">Grades</th><th>Median</th><th>p</th><th>q</th><th>Votes</th><th>%</th><th>Seats</th><th>%</th><th class="seatbar"></th></tr>${rows}</table>` +
+      `<table class="main"><tr><th>Party</th><th class="grades">Grades</th><th>Median</th><th>p</th><th>q</th><th title="average points, Excellent 5 … Reject 0">Avg</th><th title="share of voters grading the party Good or better">Appr.</th><th>Votes</th><th>%</th><th>Seats</th><th>%</th><th class="seatbar"></th></tr>${rows}</table>` +
       `<div class="lev">${lev}</div>` +
       `<details><summary>districts</summary><table><tr><th>District</th><th>Seats</th><th>Voters</th><th>Mandates</th></tr>${dist}</table></details>`;
   }
@@ -386,8 +393,8 @@
   function autoName() {
     if (nameTouched) return;
     const s = dialogSpec();
-    const m = s.method === "grades" ? "Majority Judgment" : "Single vote";
-    const sp = s.split === "norway" ? "Sainte-Laguë" : s.split === "1" ? "WTA" : s.split;
+    const m = METHOD[s.method] || s.method;
+    const sp = s.split === "norway" ? "Sainte-Laguë" : s.split === "dhondt" ? "D'Hondt" : s.split === "1" ? "WTA" : s.split;
     const l = s.levelling === "threshold" ? "4 %" : s.levelling === "open" ? "open" : "no levelling";
     $("name").value = `${m} · ${sp} · ${l}`;
   }

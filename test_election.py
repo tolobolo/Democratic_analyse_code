@@ -449,7 +449,8 @@ def test_system_spec_validation():
         with pytest.raises(ValueError):
             SystemSpec(**{"name": "x", "method": "grades", "split": "1", "levelling": "threshold", **bad}).validate()
     assert SystemSpec.from_dict({"name": "n", "method": "votes", "split": "norway", "levelling": "none"}).split == NORWAY
-    assert set(PRESETS) == {"Norwegian", "American"}
+    assert set(PRESETS) == {"Norwegian", "American", "French"}
+    assert PRESETS["French"] == SystemSpec("French", "tworound", "1", "none")
 
 
 def test_presets_and_levelling_none():
@@ -505,3 +506,71 @@ def test_ui_handle_run_and_errors():
         ui.handle_run({"voters": {"source": "random", "parties": ["A", "B"], "n": 100, "seed": 1},
                        "systems": [{"name": "z", "method": "nope"}]})
     assert ui.presets_payload()["cses_years"][-1] == 2017
+
+
+# ---------------------------------------------------------------- more vote-counting methods and splits
+
+def test_dhondt_vs_sainte_lague():
+    from election import dhondt
+    votes = {"A": 100, "B": 80, "C": 30}
+    # D'Hondt 5 seats: A 100, 50, 33.3 | B 80, 40 | C 30 -> A 3, B 2, C 0
+    assert dhondt(votes, 5) == {"A": 3, "B": 2, "C": 0}
+    # Sainte-Lague 1.4: A 71.4, 33.3 | B 57.1, 26.7 | C 21.4 -> A 2, B 2, C 1 (kinder to small parties)
+    assert sainte_lague(votes, 5) == {"A": 2, "B": 2, "C": 1}
+    assert parse_split("dhondt") == "dhondt"
+
+
+def test_score_and_approval_ranking():
+    from election import score_rank, approval_rank, score_totals, approvals, GRADE_SCORE
+    assert GRADE_SCORE[G.EXCELLENT] == 5 and GRADE_SCORE[G.REJECT] == 0
+    # A: one Excellent, rest Reject (median Reject, mean 1.25). B: all Acceptable (median Acceptable, mean 2).
+    ballots = [{"A": G.EXCELLENT, "B": G.ACCEPTABLE}] + [{"A": G.REJECT, "B": G.ACCEPTABLE}] * 3
+    assert score_totals(ballots, ["A", "B"]) == {"A": 5, "B": 8}
+    assert score_rank(ballots, ["A", "B"]) == ["B", "A"]
+    assert mj_winner(ballots, ["A", "B"]) == "B"
+    # approval: Good or better counts, Acceptable does not
+    assert approvals(ballots, ["A", "B"]) == {"A": 1, "B": 0}
+    assert approval_rank(ballots, ["A", "B"]) == ["A", "B"]
+    # score beats MJ: A loved by few, B mildly liked by all
+    ballots = [{"A": G.EXCELLENT, "B": G.GOOD}] * 2 + [{"A": G.REJECT, "B": G.GOOD}] * 3
+    assert mj_winner(ballots, ["A", "B"]) == "B"
+    assert score_rank(ballots, ["A", "B"]) == ["B", "A"]  # A 2.0 vs B 3.0
+
+
+def test_two_round_runoff():
+    from election import two_round
+    parties = ["A", "B", "C"]
+    # First round: A 40, B 35, C 25 -> no majority, runoff A vs B.
+    # C's voters all prefer B over A, so B wins the runoff.
+    ballots = ([{"A": G.EXCELLENT, "B": G.POOR, "C": G.REJECT}] * 40
+               + [{"A": G.REJECT, "B": G.EXCELLENT, "C": G.POOR}] * 35
+               + [{"A": G.REJECT, "B": G.GOOD, "C": G.EXCELLENT}] * 25)
+    votes = {"A": 40, "B": 35, "C": 25}
+    ranking, runoff = two_round(ballots, votes, parties)
+    assert ranking == ["B", "A", "C"]
+    assert runoff == {"A": 40, "B": 60}
+    # majority in round one: no runoff
+    ranking, runoff = two_round(ballots[:40] + ballots[40:60], {"A": 40, "B": 20, "C": 0}, parties)
+    assert ranking == ["A", "B", "C"] and runoff is None
+    # equal grades for both finalists = abstain
+    ballots = [{"A": G.GOOD, "B": G.GOOD, "C": G.EXCELLENT}] * 2 + [{"A": G.EXCELLENT, "B": G.REJECT, "C": G.REJECT}] * 2 + [{"A": G.REJECT, "B": G.EXCELLENT, "C": G.REJECT}] * 2
+    ranking, runoff = two_round(ballots, {"A": 2, "B": 2, "C": 2}, parties)
+    assert runoff == {"A": 2, "B": 2} and ranking[0] == "A"  # tie -> first-round leader (input order)
+
+
+def test_every_method_and_split_hands_out_169():
+    from election import METHODS, SystemSpec, make_voters, run_system, run_board, DHONDT
+    parties = ["A", "B", "C", "D"]
+    v = make_voters(parties, simulate_districts(parties, 3000, random.Random(8)), random.Random(0))
+    specs = []
+    for m in METHODS:
+        for split in ("1", "2,1,1", NORWAY, DHONDT):
+            for lev in ("threshold", "open", "none"):
+                specs.append(SystemSpec(f"{m}-{split}-{lev}", m, split, lev))
+    for spec in specs:
+        res = run_system(spec, v)
+        assert sum(res.seats.values()) == 169, spec
+    out = run_board(v, specs[:5])
+    row = out["blocks"][0]["rows"][0]
+    assert {"score", "approvals", "approval_share"} <= set(row)
+    assert 0 <= row["score"] <= 5
