@@ -78,7 +78,7 @@
   dialog label.opt small { color: var(--muted); margin-left: 4px; }
   dialog input[type=text] { font: inherit; color: var(--ink); background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
-  .banner { position: fixed; bottom: 12px; right: 12px; background: var(--g-rej); color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 12px; display: none; z-index: 30; max-width: 60%; }
+  .banner { position: fixed; bottom: 12px; right: 12px; background: var(--g-rej); color: #fff; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; z-index: 30; max-width: 60%; box-shadow: 0 4px 14px rgba(0,0,0,.3); }
   .banner.on { display: block; }
   .empty { position: absolute; top: 90px; left: 24px; color: var(--muted); }
 </style>
@@ -99,7 +99,7 @@
   <input id="seed" type="number">
   <div class="status" id="status"></div>
   <label class="toggle"><input type="checkbox" id="dark"> dark mode</label>
-  <div class="status">Every change re-runs all blocks on the same voters. Drag a block from anywhere on it, resize it by the bottom-right corner. Layout is saved in this browser.<br><button id="reset-layout" type="button">Reset layout</button></div>
+  <div class="status">Every change re-runs all blocks on the same voters. Drag a block from anywhere on it, resize it by the bottom-right corner. Layout is saved in this browser.<br><button id="reset-layout" type="button">Reset layout</button> <button id="clear-board" type="button" title="remove every block and forget the saved layout">Clear board</button></div>
 </aside>
 
 <main>
@@ -150,6 +150,15 @@
 <div class="banner" id="banner"></div>
 
 <script>
+window.addEventListener("error", (e) => {
+  if (/ResizeObserver loop/.test(e.message)) return;  // benign browser notice, not a failure
+  const b = document.getElementById("banner");
+  if (b) { b.textContent = "Page error: " + e.message + " (line " + e.lineno + ")"; b.classList.add("on"); }
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const b = document.getElementById("banner");
+  if (b) { b.textContent = "Page error: " + (e.reason && e.reason.message || e.reason); b.classList.add("on"); }
+});
 (function () {
   const KEY = "board.v1";
   const GRADES = ["Excellent", "Very Good", "Good", "Acceptable", "Poor", "Reject"];
@@ -163,9 +172,18 @@
     blocks: [], dark: null, seeded: false,
   };
   let presets = [], results = null, timer = null, inflight = null, pending = false;
+  state.blocks = (state.blocks || []).filter((b) => b && b.spec && b.spec.method && typeof b.x === "number");
+  if (!state.voters) state.voters = { source: "random", parties: ["Far-left", "Center", "Far-right"], n: 10000, seed: 42 };
 
-  function load() { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } }
-  function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+  // Storage may be blocked (privacy settings, private window). Then the board still works,
+  // it just forgets the layout on reload.
+  let storageOk = true;
+  function load() { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { storageOk = false; return null; } }
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(state)); }
+    catch (e) { if (storageOk) { storageOk = false; note("Browser storage is blocked: the layout will not be remembered."); } }
+  }
+  function note(msg) { const b = $("banner"); b.textContent = msg; b.classList.add("on"); setTimeout(() => b.classList.remove("on"), 6000); }
 
   // ---------- theme
   function applyTheme() {
@@ -174,6 +192,8 @@
     $("dark").checked = dark;
   }
   $("dark").addEventListener("change", () => { state.dark = $("dark").checked; save(); applyTheme(); });
+  // boot message so a blank board is never silent
+  $("status").textContent = "loading…";
 
   // ---------- sidebar
   function fillSidebar() {
@@ -210,7 +230,11 @@
   }
   function addBlock(spec) {
     const k = state.blocks.length;
-    state.blocks.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), spec, x: 20 + (k % 2) * 620, y: 60 + Math.floor(k / 2) * 420 + (k % 2) * 20 });
+    const main = document.querySelector("main");
+    // start in the visible part of the board, cascaded so new blocks don't hide each other
+    const x = Math.max(0, main.scrollLeft) + 20 + (k % 3) * 40;
+    const y = Math.max(0, main.scrollTop) + 60 + (k % 3) * 40;
+    state.blocks.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), spec, x, y });
     save();
     renderBlocks();
     schedule();
@@ -243,7 +267,7 @@
       if (b.h) el.style.height = b.h + "px";
       el.querySelector("h2").innerHTML = `${esc(b.spec.name)}<small>${esc(describe(b.spec))}</small>`;
       const res = results && results.blocks[i];
-      if (res) { el.querySelector(".body").innerHTML = renderResult(res, b.spec); fitRows(el); }
+      if (res) { el.querySelector(".body").innerHTML = renderResult(res, b.spec); if (b.h) fitRows(el); else el.querySelector(".body").style.removeProperty("--row"); }
       else if (!el.querySelector(".body").innerHTML) el.querySelector(".body").innerHTML = '<div class="lev">computing…</div>';
     });
     $("empty").hidden = state.blocks.length > 0;
@@ -270,18 +294,29 @@
   }
   let sizeTimer = null;
   function observeSize(el, b) {
+    if (typeof ResizeObserver === "undefined") return;  // old browser: resizing works, size is not remembered
     // the browser's own resize corner changes the element; remember the result
+    let raf = 0;
     new ResizeObserver(() => {
       if (!el.isConnected) return;
       const w = Math.round(el.offsetWidth), h = Math.round(el.offsetHeight);
-      fitRows(el);
-      if (w === (b.w || 600) && (!b.h || h === b.h)) return;
-      if (w !== b.w) b.w = w;
-      if (h !== b.h) b.h = h;
+      const changed = w !== (b.w || 600) || (b.h ? h !== b.h : false);
+      if (w !== (b.w || 600)) b.w = w;
+      // a height is only remembered once the user has dragged the corner (block has a set height)
+      if (el.style.height && h !== b.h) b.h = h;
+      // Never change layout inside the observer callback: that re-triggers it in a loop.
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => { if (b.h) fitRows(el); });
+      if (!changed) return;
       clearTimeout(sizeTimer);
       sizeTimer = setTimeout(() => { save(); fitBoard(); }, 150);
     }).observe(el);
   }
+  $("clear-board").addEventListener("click", () => {
+    if (!confirm("Remove all blocks and forget the saved layout?")) return;
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    location.reload();
+  });
   $("reset-layout").addEventListener("click", () => {
     state.blocks.forEach((b, k) => { delete b.w; delete b.h; b.x = 20 + (k % 2) * 620; b.y = 60 + Math.floor(k / 2) * 420 + (k % 2) * 20; });
     $("board").querySelectorAll(".block").forEach((el) => { el.style.width = ""; el.style.height = ""; });
@@ -374,6 +409,7 @@
     } catch (e) {
       $("banner").textContent = e.message;
       $("banner").classList.add("on");
+      document.querySelectorAll(".block .body").forEach((b) => { b.innerHTML = `<div class="lev" style="color:var(--g-rej)">${esc(e.message)}</div>`; });
     } finally {
       inflight = null;
       $("progress").classList.remove("on");
@@ -400,7 +436,18 @@
   }
   form.addEventListener("input", (e) => { if (e.target.id === "name") nameTouched = true; else autoName(); });
   $("custom").addEventListener("focus", () => { form.querySelector('input[name=split][value=custom]').checked = true; autoName(); });
-  $("new").addEventListener("click", () => { form.reset(); nameTouched = false; autoName(); dlg.showModal(); });
+  $("new").addEventListener("click", () => {
+    form.reset(); nameTouched = false; autoName();
+    if (typeof dlg.showModal === "function") { dlg.showModal(); return; }
+    // very old browser without <dialog>: ask with a prompt instead
+    const m = prompt("Method: grades, score, approval, votes or tworound", "grades");
+    if (!m) return;
+    const sp = prompt("Split: 1, 2,1,1, 3,2,1, norway, dhondt or custom weights", "1");
+    if (!sp) return;
+    const lv = prompt("Levelling: threshold, open or none", "threshold");
+    if (!lv) return;
+    addBlock({ name: `${m} · ${sp} · ${lv}`, method: m.trim(), split: sp.trim(), levelling: lv.trim() });
+  });
   $("cancel").addEventListener("click", () => dlg.close());
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -411,7 +458,7 @@
   });
 
   // ---------- presets + boot
-  fetch("/api/presets").then((r) => r.json()).then((p) => {
+  fetch("/api/presets").then((r) => r.json()).catch((e) => { note("Cannot reach the server: " + e.message); throw e; }).then((p) => {
     presets = p;
     $("presets").innerHTML = p.presets.map((s, i) => `<button data-i="${i}">${esc(s.name)}</button>`).join(" ");
     $("presets").querySelectorAll("button").forEach((btn) => btn.addEventListener("click", () => addBlock({ ...p.presets[+btn.dataset.i] })));
